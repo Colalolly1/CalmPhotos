@@ -66,7 +66,8 @@ fun CalmPhotosApp(vm: PhotosViewModel, hasPermission: Boolean, onRequestPermissi
     }
 
     // Keep the open album in step with the live library (deletions, new shots).
-    val liveAlbum = openAlbum?.let { a -> albums.find { it.id == a.id } }
+    // Smart albums (negative ids) aren't folders, so they pass straight through.
+    val liveAlbum = openAlbum?.let { a -> if (a.id < 0) a else (albums.find { it.id == a.id } ?: a) }
     val favItems = remember(library, favourites) { library.filter { it.id in favourites } }
     val shown: List<MediaItem> = when {
         liveAlbum != null -> liveAlbum.items
