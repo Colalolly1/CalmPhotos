@@ -221,6 +221,8 @@ private fun VideoPage(
     val ctx = LocalContext.current
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         if (playing) {
+            // The white sits behind the surface, not on it.
+            Box(Modifier.fillMaxSize().background(Ink.white))
             // Plays here, on the phone's own codecs. Handing the video to another
             // app meant nothing happened at all when no installed app claimed that
             // format, which is easy to arrange on a phone kept this bare.
@@ -228,7 +230,9 @@ private fun VideoPage(
                 modifier = Modifier.fillMaxSize(),
                 factory = { c ->
                     VideoView(c).apply {
-                        setBackgroundColor(android.graphics.Color.WHITE)
+                        // No background here: VideoView is a SurfaceView, and an
+                        // opaque background is painted straight over the video,
+                        // which showed as a white screen with sound.
                         setOnPreparedListener { start() }
                         setOnCompletionListener { onStop() }
                         setOnErrorListener { _, _, _ ->
