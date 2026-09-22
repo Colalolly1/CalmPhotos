@@ -34,6 +34,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
+ * How large to decode a photo for the viewer. The pager holds the page either
+ * side as well, so this is paid three times; 1280 is still comfortably above
+ * the 824px screen and a third of the memory the old 2048 cost.
+ */
+private const val VIEWER_DECODE = 1280
+
+/**
  * Full-screen viewer. Swipe between photos, pinch or double-tap to zoom,
  * words along the bottom for the four things you actually do with a photo.
  * Videos show their first frame and a Play word that hands off to the
@@ -163,7 +170,7 @@ private fun ZoomablePhoto(item: MediaItem, onZoomChanged: (Boolean) -> Unit) {
         contentAlignment = Alignment.Center,
     ) {
         AsyncImage(
-            model = remember(item.uri) { ImageRequest.Builder(ctx).data(item.uri).size(2048).build() },
+            model = remember(item.uri) { ImageRequest.Builder(ctx).data(item.uri).size(VIEWER_DECODE).build() },
             contentDescription = item.name,
             contentScale = ContentScale.Fit,
             modifier = Modifier
@@ -181,7 +188,7 @@ private fun VideoPage(item: MediaItem) {
     val ctx = LocalContext.current
     Box(Modifier.fillMaxSize().clickable { play(ctx, item) }, contentAlignment = Alignment.Center) {
         AsyncImage(
-            model = remember(item.uri) { ImageRequest.Builder(ctx).data(item.uri).size(1600).build() },
+            model = remember(item.uri) { ImageRequest.Builder(ctx).data(item.uri).size(VIEWER_DECODE).build() },
             contentDescription = item.name,
             contentScale = ContentScale.Fit,
             modifier = Modifier.fillMaxSize(),

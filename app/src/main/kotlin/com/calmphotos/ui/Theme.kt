@@ -36,7 +36,9 @@ object Ink {
     val white = Color.White
     val grey = Color(0xFF6E6E6E)
     val light = Color(0xFF777777)
-    val hairline = Color(0xFFD6D6D6)
+    // Pale greys wash out entirely on E-Ink; this is the lightest that still
+    // draws as a line rather than as nothing at all.
+    val hairline = Color(0xFFB0B0B0)
     val paper = Color(0xFFF5F5F5)
     val scrim = Color(0x66000000)
 }

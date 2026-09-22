@@ -2,6 +2,8 @@ package com.calmphotos.data
 
 import android.content.Context
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
+import kotlinx.coroutines.flow.catch
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -17,7 +19,11 @@ class Prefs(private val context: Context) {
         val columns = intPreferencesKey("columns")
     }
 
-    val favourites: Flow<Set<Long>> = context.store.data.map { p ->
+    // A corrupt or unreadable settings file should cost you your favourites,
+    // not the whole app at launch.
+    private val safeData = context.store.data.catch { emit(emptyPreferences()) }
+
+    val favourites: Flow<Set<Long>> = safeData.map { p ->
         (p[Keys.favourites] ?: emptySet()).mapNotNull { it.toLongOrNull() }.toSet()
     }
 
@@ -29,6 +35,6 @@ class Prefs(private val context: Context) {
         }
     }
 
-    val columns: Flow<Int> = context.store.data.map { it[Keys.columns] ?: 4 }
+    val columns: Flow<Int> = safeData.map { it[Keys.columns] ?: 4 }
     suspend fun setColumns(n: Int) { context.store.edit { it[Keys.columns] = n.coerceIn(2, 6) } }
 }

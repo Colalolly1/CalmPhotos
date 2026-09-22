@@ -13,6 +13,7 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
+import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -22,6 +23,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.calmphotos.data.Album
 import com.calmphotos.data.MediaItem
 import com.calmphotos.data.Smart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 import java.time.LocalDate
 import java.time.temporal.ChronoUnit
@@ -145,7 +148,12 @@ fun CalmPhotosApp(
             else -> library
         }
     }
-    val entries = remember(shown) { groupByDay(shown) }
+    // Grouping a whole library by day is real work, and doing it inside layout
+    // showed as a stutter once the library grew. It happens off the main thread
+    // now, so the grid keeps the previous grouping for the frame it takes.
+    val entries by produceState(initialValue = emptyList<Entry>(), shown) {
+        value = withContext(Dispatchers.Default) { groupByDay(shown) }
+    }
     val gridState = rememberLazyGridState()
     val scope = rememberCoroutineScope()
     // A selection only ever means the list in front of you, so changing that
@@ -407,8 +415,12 @@ private fun BinSelectionBar(count: Int, onRestore: () -> Unit, onForever: () -> 
             modifier = Modifier.weight(1f).padding(start = 8.dp),
         )
         Word("All", quiet = true, onClick = onAll)
-        Word("Restore", enabled = count > 0, onClick = onRestore)
-        Word("Erase", enabled = count > 0, onClick = onForever)
+        // Hidden rather than greyed: on E-Ink a disabled word is indistinguishable
+        // from a quiet one, so it just looked broken.
+        if (count > 0) {
+            Word("Restore", onClick = onRestore)
+            Word("Erase", onClick = onForever)
+        }
         Word("Cancel", quiet = true, onClick = onCancel)
     }
 }
@@ -425,8 +437,10 @@ private fun SelectionBar(count: Int, onShare: () -> Unit, onDelete: () -> Unit, 
             modifier = Modifier.weight(1f).padding(start = 8.dp),
         )
         Word("All", quiet = true, onClick = onAll)
-        Word("Share", enabled = count > 0, onClick = onShare)
-        Word("Delete", enabled = count > 0, onClick = onDelete)
+        if (count > 0) {
+            Word("Share", onClick = onShare)
+            Word("Delete", onClick = onDelete)
+        }
         Word("Cancel", quiet = true, onClick = onCancel)
     }
 }

@@ -128,7 +128,9 @@ fun Thumb(
             .combinedClickable(onClick = onTap, onLongClick = onLongPress),
     ) {
         AsyncImage(
-            model = remember(item.uri) { ImageRequest.Builder(ctx).data(item.uri).size(480).build() },
+            // No explicit size: Coil decodes to the measured cell, which is about
+            // 205px at four across, not the 480px this used to ask for every time.
+            model = remember(item.uri) { ImageRequest.Builder(ctx).data(item.uri).build() },
             contentDescription = item.name,
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize(),

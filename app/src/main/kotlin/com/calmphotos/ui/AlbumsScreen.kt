@@ -59,7 +59,7 @@ private fun AlbumCard(album: Album, onOpen: (Album) -> Unit) {
         Box(Modifier.fillMaxWidth().aspectRatio(1f).background(Ink.paper)) {
             album.cover?.let { c ->
                 AsyncImage(
-                    model = remember(c.uri) { ImageRequest.Builder(ctx).data(c.uri).size(640).build() },
+                    model = remember(c.uri) { ImageRequest.Builder(ctx).data(c.uri).build() },
                     contentDescription = album.name,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize(),
