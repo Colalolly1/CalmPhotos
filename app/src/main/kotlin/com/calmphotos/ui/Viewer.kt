@@ -23,6 +23,9 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import android.widget.MediaController
+import android.widget.VideoView
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -63,6 +66,9 @@ fun Viewer(
     if (items.isEmpty()) { onClose(); return }
     val pager = rememberPagerState(initialPage = startIndex.coerceIn(0, items.size - 1)) { items.size }
     var zoomed by remember { mutableStateOf(false) }
+    // Which video is playing inline, if any. Held by id so swiping away stops it.
+    var playingId by remember { mutableStateOf<Long?>(null) }
+    var message by remember { mutableStateOf<String?>(null) }
     var showInfo by remember { mutableStateOf(false) }
     val ctx = LocalContext.current
     val current = items[pager.currentPage.coerceIn(0, items.size - 1)]
@@ -82,15 +88,33 @@ fun Viewer(
         }
         Hairline()
 
+        // Moving to another photo stops whatever was playing.
+        LaunchedEffect(pager.currentPage) { playingId = null; message = null }
+
         HorizontalPager(
             state = pager,
-            userScrollEnabled = !zoomed,
+            userScrollEnabled = !zoomed && playingId == null,
             beyondBoundsPageCount = 1,
             modifier = Modifier.weight(1f).fillMaxWidth(),
         ) { page ->
             val item = items[page]
-            if (item.isVideo) VideoPage(item)
-            else ZoomablePhoto(item, onZoomChanged = { z -> if (page == pager.currentPage) zoomed = z })
+            if (item.isVideo) VideoPage(
+                item = item,
+                playing = playingId == item.id,
+                onPlay = { message = null; playingId = item.id },
+                onStop = { playingId = null },
+                onError = { why -> playingId = null; message = why },
+            ) else ZoomablePhoto(item, onZoomChanged = { z -> if (page == pager.currentPage) zoomed = z })
+        }
+
+        message?.let { text ->
+            Row(
+                Modifier.fillMaxWidth().background(Ink.paper).padding(horizontal = 14.dp, vertical = 9.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(text, style = Type.label, modifier = Modifier.weight(1f))
+                Word("OK", quiet = true) { message = null }
+            }
         }
 
         if (showInfo) InfoPanel(current)
@@ -103,13 +127,16 @@ fun Viewer(
         ) {
             if (inBin) {
                 Word("Restore") { onRestore(current) }
-                if (current.isVideo) Word("Play") { play(ctx, current) }
+                if (current.isVideo && playingId == current.id) Word("Stop") { playingId = null }
                 Word("Erase", quiet = true) { onDeleteForever(current) }
             } else {
                 val fav = current.id in favourites
                 Word(if (fav) "♥ Favourite" else "♡ Favourite") { onToggleFavourite(current) }
                 Word("Share") { onShare(current) }
-                if (current.isVideo) Word("Play") { play(ctx, current) }
+                if (current.isVideo) {
+                    if (playingId == current.id) Word("Stop") { playingId = null }
+                    else Word("Open in…", quiet = true) { message = openExternally(ctx, current) }
+                }
                 Word("Delete", quiet = true) { onDelete(current) }
             }
         }
@@ -184,23 +211,59 @@ private fun ZoomablePhoto(item: MediaItem, onZoomChanged: (Boolean) -> Unit) {
 }
 
 @Composable
-private fun VideoPage(item: MediaItem) {
+private fun VideoPage(
+    item: MediaItem,
+    playing: Boolean,
+    onPlay: () -> Unit,
+    onStop: () -> Unit,
+    onError: (String) -> Unit,
+) {
     val ctx = LocalContext.current
-    Box(Modifier.fillMaxSize().clickable { play(ctx, item) }, contentAlignment = Alignment.Center) {
-        AsyncImage(
-            model = remember(item.uri) { ImageRequest.Builder(ctx).data(item.uri).size(VIEWER_DECODE).build() },
-            contentDescription = item.name,
-            contentScale = ContentScale.Fit,
-            modifier = Modifier.fillMaxSize(),
-        )
-        FilledWord("▶  Play  ·  ${durationLabel(item.durationMs)}") { play(ctx, item) }
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        if (playing) {
+            // Plays here, on the phone's own codecs. Handing the video to another
+            // app meant nothing happened at all when no installed app claimed that
+            // format, which is easy to arrange on a phone kept this bare.
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { c ->
+                    VideoView(c).apply {
+                        setBackgroundColor(android.graphics.Color.WHITE)
+                        setOnPreparedListener { start() }
+                        setOnCompletionListener { onStop() }
+                        setOnErrorListener { _, _, _ ->
+                            onError("This phone can't decode ${item.mime.ifEmpty { "that format" }}. Try Open in… instead.")
+                            true
+                        }
+                        setMediaController(MediaController(c).also { it.setAnchorView(this) })
+                        setVideoURI(item.uri)
+                    }
+                },
+                onRelease = { it.stopPlayback() },
+            )
+        } else {
+            AsyncImage(
+                model = remember(item.uri) { ImageRequest.Builder(ctx).data(item.uri).size(VIEWER_DECODE).build() },
+                contentDescription = item.name,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize().clickable(onClick = onPlay),
+            )
+            FilledWord("▶  Play  ·  ${durationLabel(item.durationMs)}", onClick = onPlay)
+        }
     }
 }
 
-private fun play(ctx: android.content.Context, item: MediaItem) {
-    val i = Intent(Intent.ACTION_VIEW).setDataAndType(item.uri, item.mime.ifEmpty { "video/*" })
+/** Hand the video to another app, and say so plainly when none will take it. */
+private fun openExternally(ctx: android.content.Context, item: MediaItem): String? {
+    val i = Intent(Intent.ACTION_VIEW)
+        .setDataAndType(item.uri, item.mime.ifEmpty { "video/*" })
         .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-    try { ctx.startActivity(i) } catch (_: Exception) { }
+    return try {
+        ctx.startActivity(i)
+        null
+    } catch (_: Exception) {
+        "No app on this phone opens ${item.mime.ifEmpty { "that format" }}. Tap the picture to play it here."
+    }
 }
 
 /** The facts about a photo, read from the media store and the file's EXIF. */
