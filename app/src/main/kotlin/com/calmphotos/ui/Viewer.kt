@@ -5,7 +5,13 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -108,21 +114,50 @@ private fun ZoomablePhoto(item: MediaItem, onZoomChanged: (Boolean) -> Unit) {
     val ctx = LocalContext.current
     var scale by remember(item.id) { mutableFloatStateOf(1f) }
     var offset by remember(item.id) { mutableStateOf(Offset.Zero) }
-    LaunchedEffect(scale) { onZoomChanged(scale > 1.02f) }
+    var boxSize by remember { mutableStateOf(IntSize.Zero) }
+    LaunchedEffect(scale) { onZoomChanged(scale > 1.01f) }
+
+    /** Keep the picture over the hole it is shown through, never beyond its edges. */
+    fun clampOffset() {
+        val maxX = (boxSize.width * (scale - 1f) / 2f).coerceAtLeast(0f)
+        val maxY = (boxSize.height * (scale - 1f) / 2f).coerceAtLeast(0f)
+        offset = Offset(offset.x.coerceIn(-maxX, maxX), offset.y.coerceIn(-maxY, maxY))
+    }
+
     Box(
         Modifier
             .fillMaxSize()
+            .onSizeChanged { boxSize = it }
             .pointerInput(item.id) {
-                detectTransformGestures { _, pan, zoom, _ ->
-                    val newScale = (scale * zoom).coerceIn(1f, 6f)
-                    offset = if (newScale <= 1f) Offset.Zero else offset + pan
-                    scale = newScale
+                // Hand-rolled instead of detectTransformGestures, which consumes
+                // every drag once past touch slop — including one-finger swipes at
+                // rest scale, so the pager behind it never saw them and you could
+                // not move between photos. Here a single finger is only ours once
+                // the picture is actually zoomed in.
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    do {
+                        val event = awaitPointerEvent()
+                        val fingers = event.changes.count { it.pressed }
+                        val ours = fingers > 1 || scale > 1.01f
+                        if (ours) {
+                            val zoom = event.calculateZoom()
+                            if (zoom != 1f) {
+                                scale = (scale * zoom).coerceIn(1f, 6f)
+                                if (scale <= 1.01f) { scale = 1f; offset = Offset.Zero }
+                            }
+                            if (scale > 1.01f) offset += event.calculatePan()
+                            clampOffset()
+                            event.changes.forEach { if (it.positionChanged()) it.consume() }
+                        }
+                    } while (event.changes.any { it.pressed })
                 }
             }
             .pointerInput(item.id) {
-                detectTapGestures(onDoubleTap = { tap ->
-                    if (scale > 1f) { scale = 1f; offset = Offset.Zero }
-                    else { scale = 2.5f; offset = (Offset(size.width / 2f, size.height / 2f) - tap) * 1.5f }
+                detectTapGestures(onDoubleTap = {
+                    if (scale > 1.01f) { scale = 1f } else { scale = 2.5f }
+                    offset = Offset.Zero
+                    clampOffset()
                 })
             },
         contentAlignment = Alignment.Center,

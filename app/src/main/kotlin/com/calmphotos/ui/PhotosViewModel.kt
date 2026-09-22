@@ -20,11 +20,23 @@ class PhotosViewModel(app: Application) : AndroidViewModel(app) {
     private val hasPermission = MutableStateFlow(false)
     fun permissionGranted() { hasPermission.value = true }
 
+    /**
+     * Re-read everything on demand. Granting access to more photos doesn't
+     * always raise a media-store change, so returning to the app asks directly.
+     */
+    private val manualReload = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    fun reload() {
+        manualReload.tryEmit(Unit)
+        refreshTrash()
+    }
+
     private val _loaded = MutableStateFlow(false)
     val loaded: StateFlow<Boolean> = _loaded
 
     val library: StateFlow<List<MediaItem>> = hasPermission
-        .flatMapLatest { ok -> if (ok) repo.library() else flowOf(emptyList()) }
+        .flatMapLatest { ok ->
+            if (ok) merge(repo.library(), manualReload.map { repo.loadAll() }) else flowOf(emptyList())
+        }
         .onEach { if (hasPermission.value) { _loaded.value = true; refreshTrash() } }
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 

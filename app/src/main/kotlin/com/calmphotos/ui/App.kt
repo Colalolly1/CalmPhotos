@@ -1,6 +1,7 @@
 package com.calmphotos.ui
 
 import android.content.Intent
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -20,6 +21,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.calmphotos.data.Album
 import com.calmphotos.data.MediaItem
+import com.calmphotos.data.Smart
 import kotlinx.coroutines.launch
 import java.time.LocalDate
 import java.time.temporal.ChronoUnit
@@ -32,7 +34,12 @@ private enum class Tab(val label: String) { PHOTOS("Photos"), ALBUMS("Albums"), 
  * top. No icons, no animation, nothing that leaves the phone.
  */
 @Composable
-fun CalmPhotosApp(vm: PhotosViewModel, hasPermission: Boolean, onRequestPermission: () -> Unit) {
+fun CalmPhotosApp(
+    vm: PhotosViewModel,
+    hasPermission: Boolean,
+    onRequestPermission: () -> Unit,
+    partialAccess: Boolean = false,
+) {
     val library by vm.library.collectAsStateWithLifecycle()
     val albums by vm.albums.collectAsStateWithLifecycle()
     val favourites by vm.favourites.collectAsStateWithLifecycle()
@@ -42,86 +49,165 @@ fun CalmPhotosApp(vm: PhotosViewModel, hasPermission: Boolean, onRequestPermissi
 
     var tab by remember { mutableStateOf(Tab.PHOTOS) }
     var openAlbum by remember { mutableStateOf<Album?>(null) }
-    var viewer by remember { mutableStateOf<Pair<List<MediaItem>, Int>?>(null) }
+    // The open photo is held by id, not by index into a list that can change
+    // under it: binning a photo used to leave the viewer pointing at a gap.
+    var viewerId by remember { mutableStateOf<Long?>(null) }
     var selection by remember { mutableStateOf<Set<Long>?>(null) }
     var showMonths by remember { mutableStateOf(false) }
     var showMore by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf<List<MediaItem>?>(null) }
     var confirmForever by remember { mutableStateOf<List<MediaItem>?>(null) }
+    var notice by remember { mutableStateOf<String?>(null) }
+    // Android marshals every URI of a trash/delete request through one Binder
+    // transaction, which is capped near 1 MB, so a whole-library selection has
+    // to go in batches. Each batch asks for consent once.
+    var queue by remember { mutableStateOf<List<List<MediaItem>>>(emptyList()) }
+    var queueOp by remember { mutableStateOf(BulkOp.TRASH) }
+    var awaitingConsent by remember { mutableStateOf(false) }
 
     val ctx = LocalContext.current
-    val trashLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { vm.refreshTrash() }
-    fun trash(items: List<MediaItem>) {
-        if (items.isEmpty()) return
-        trashLauncher.launch(IntentSenderRequest.Builder(vm.trashRequest(items).intentSender).build())
-        selection = null
+    val trashLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
+        awaitingConsent = false
+        vm.refreshTrash()
+        // Said no to a batch: abandon the rest rather than asking over and over.
+        if (result.resultCode != android.app.Activity.RESULT_OK) queue = emptyList()
+    }
+    LaunchedEffect(queue, awaitingConsent) {
+        if (awaitingConsent) return@LaunchedEffect
+        val batch = queue.firstOrNull() ?: return@LaunchedEffect
+        queue = queue.drop(1)
+        awaitingConsent = true
+        val request = when (queueOp) {
+            BulkOp.TRASH -> vm.trashRequest(batch)
+            BulkOp.RESTORE -> vm.restoreRequest(batch)
+            BulkOp.ERASE -> vm.deleteForeverRequest(batch)
+        }
+        trashLauncher.launch(IntentSenderRequest.Builder(request.intentSender).build())
+    }
+
+    /** Clears the sheet first, so a confirmation can never be left with a dead button. */
+    fun startBulk(op: BulkOp, items: List<MediaItem>) {
         confirmDelete = null
-        viewer = null   // the photo you were looking at is on its way to the bin
-    }
-    fun restore(items: List<MediaItem>) {
-        if (items.isEmpty()) return
-        trashLauncher.launch(IntentSenderRequest.Builder(vm.restoreRequest(items).intentSender).build())
-        selection = null
-        viewer = null
-    }
-    fun deleteForever(items: List<MediaItem>) {
-        if (items.isEmpty()) return
-        trashLauncher.launch(IntentSenderRequest.Builder(vm.deleteForeverRequest(items).intentSender).build())
-        selection = null
         confirmForever = null
-        viewer = null
+        selection = null
+        if (items.isEmpty()) return
+        viewerId = null   // whatever you were looking at is on its way out
+        queueOp = op
+        queue = items.chunked(BULK_BATCH)
     }
+    fun trash(items: List<MediaItem>) = startBulk(BulkOp.TRASH, items)
+    fun restore(items: List<MediaItem>) = startBulk(BulkOp.RESTORE, items)
+    fun deleteForever(items: List<MediaItem>) = startBulk(BulkOp.ERASE, items)
     fun share(items: List<MediaItem>) {
         if (items.isEmpty()) return
+        if (items.size > SHARE_LIMIT) {
+            notice = "That is ${items.size} items. Android can only hand over about $SHARE_LIMIT at once, so pick fewer."
+            return
+        }
         val allImages = items.none { it.isVideo }
         val i = if (items.size == 1) Intent(Intent.ACTION_SEND).putExtra(Intent.EXTRA_STREAM, items[0].uri)
                 else Intent(Intent.ACTION_SEND_MULTIPLE).putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(items.map { it.uri }))
         i.type = if (allImages) "image/*" else "*/*"
         i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        ctx.startActivity(Intent.createChooser(i, null))
+        try {
+            ctx.startActivity(Intent.createChooser(i, null))
+        } catch (_: Exception) {
+            notice = "Nothing on this phone offered to take them."
+        }
     }
 
     // Keep the open album in step with the live library (deletions, new shots).
-    // Smart albums (negative ids) aren't folders, so they pass straight through.
-    val liveAlbum = openAlbum?.let { a -> if (a.id < 0) a else (albums.find { it.id == a.id } ?: a) }
-    val inBin = openAlbum?.id == BIN_ID
+    // Smart albums aren't folders, so they pass straight through.
+    val liveAlbum = openAlbum?.let { a -> if (a.kind != null) a else albums.find { it.id == a.id } }
+    val inBin = liveAlbum?.kind == Smart.BIN
     val favItems = remember(library, favourites) { library.filter { it.id in favourites } }
-    val shown: List<MediaItem> = when {
-        liveAlbum != null -> liveAlbum.items
-        tab == Tab.FAVOURITES -> favItems
-        else -> library
+    val videoItems = remember(library) { library.filter { it.isVideo } }
+
+    // Bin the last photo in a folder and the folder is gone; showing its saved
+    // contents would leave you tapping thumbnails of things that no longer exist.
+    LaunchedEffect(openAlbum, albums, loaded) {
+        val open = openAlbum
+        if (open != null && open.kind == null && loaded && albums.none { it.id == open.id }) {
+            openAlbum = null
+            tab = Tab.ALBUMS
+        }
+    }
+
+    // One list feeds the grid, the selection bar and the viewer alike. Keeping
+    // two meant Select All could act on photos other than the ones on screen.
+    val shown: List<MediaItem> = when (liveAlbum?.kind) {
+        Smart.FAVOURITES -> favItems
+        Smart.VIDEOS -> videoItems
+        Smart.BIN -> trashed
+        null -> when {
+            liveAlbum != null -> liveAlbum.items
+            tab == Tab.FAVOURITES -> favItems
+            else -> library
+        }
     }
     val entries = remember(shown) { groupByDay(shown) }
     val gridState = rememberLazyGridState()
     val scope = rememberCoroutineScope()
-    LaunchedEffect(tab, liveAlbum?.id) { gridState.scrollToItem(0) }
+    // A selection only ever means the list in front of you, so changing that
+    // list drops it. Without this it followed you out and retargeted itself.
+    LaunchedEffect(tab, liveAlbum?.id) {
+        selection = null
+        gridState.scrollToItem(0)
+    }
 
     if (!hasPermission) { PermissionScreen(onRequestPermission); return }
 
+    // Without this, back closed the whole app from anywhere: from an open photo,
+    // from inside an album, mid-selection. Each layer now peels off in turn.
+    val canGoBack = notice != null || confirmForever != null || confirmDelete != null ||
+        showMonths || showMore || viewerId != null || selection != null ||
+        openAlbum != null || tab != Tab.PHOTOS
+    BackHandler(enabled = canGoBack) {
+        when {
+            notice != null -> notice = null
+            confirmForever != null -> confirmForever = null
+            confirmDelete != null -> confirmDelete = null
+            showMonths -> showMonths = false
+            showMore -> showMore = false
+            viewerId != null -> viewerId = null
+            selection != null -> selection = null
+            openAlbum != null -> { openAlbum = null; tab = Tab.ALBUMS }
+            else -> tab = Tab.PHOTOS
+        }
+    }
+
     Box(Modifier.fillMaxSize().background(Ink.white)) {
         Column(Modifier.fillMaxSize().statusBarsPadding()) {
+            if (partialAccess) {
+                Row(
+                    Modifier.fillMaxWidth().background(Ink.paper).padding(horizontal = PagePadding, vertical = 9.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "Only the photos you picked are visible, not your whole library.",
+                        style = Type.label,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Word("Choose", onClick = onRequestPermission)
+                }
+                Hairline()
+            }
             Box(Modifier.weight(1f)) {
                 when {
                     tab == Tab.ALBUMS && liveAlbum == null -> AlbumsScreen(
                         albums = albums,
                         smart = listOfNotNull(
-                            if (favItems.isNotEmpty()) Album(-1, "Favourites", favItems) else null,
-                            library.filter { it.isVideo }.takeIf { it.isNotEmpty() }?.let { Album(-2, "Videos", it) },
-                            trashed.takeIf { it.isNotEmpty() }?.let { Album(BIN_ID, "Recently deleted", it) },
+                            favItems.takeIf { it.isNotEmpty() }?.let { Album(-1, "Favourites", it, Smart.FAVOURITES) },
+                            videoItems.takeIf { it.isNotEmpty() }?.let { Album(-2, "Videos", it, Smart.VIDEOS) },
+                            trashed.takeIf { it.isNotEmpty() }?.let { Album(-3, "Recently deleted", it, Smart.BIN) },
                         ),
                         onOpen = { a -> openAlbum = a },
                         header = { TitleBlock("Albums", "${albums.size} folder${if (albums.size == 1) "" else "s"}") },
                     )
                     else -> {
-                        val smartOpen = openAlbum?.takeIf { it.id < 0 }
-                        val list = if (smartOpen != null) when (smartOpen.id) {
-                            -1L -> favItems
-                            BIN_ID -> trashed
-                            else -> library.filter { it.isVideo }
-                        } else shown
-                        val ents = if (smartOpen != null) remember(list) { groupByDay(list) } else entries
+                        val list = shown
                         PhotosGrid(
-                            entries = ents,
+                            entries = entries,
                             columns = columns,
                             favourites = favourites,
                             selection = selection,
@@ -129,7 +215,7 @@ fun CalmPhotosApp(vm: PhotosViewModel, hasPermission: Boolean, onRequestPermissi
                             onTap = { item ->
                                 val sel = selection
                                 if (sel != null) selection = if (item.id in sel) sel - item.id else sel + item.id
-                                else viewer = list to list.indexOf(item)
+                                else viewerId = item.id
                             },
                             onLongPress = { item -> selection = (selection ?: emptySet()) + item.id },
                             leading = {
@@ -173,9 +259,9 @@ fun CalmPhotosApp(vm: PhotosViewModel, hasPermission: Boolean, onRequestPermissi
             if (sel != null && inBin) {
                 BinSelectionBar(
                     count = sel.size,
-                    onRestore = { restore(trashed.filter { it.id in sel }) },
-                    onForever = { confirmForever = trashed.filter { it.id in sel } },
-                    onAll = { selection = trashed.map { it.id }.toSet() },
+                    onRestore = { restore(shown.filter { it.id in sel }) },
+                    onForever = { confirmForever = shown.filter { it.id in sel } },
+                    onAll = { selection = shown.map { it.id }.toSet() },
                     onCancel = { selection = null },
                 )
             } else if (sel != null) {
@@ -205,12 +291,16 @@ fun CalmPhotosApp(vm: PhotosViewModel, hasPermission: Boolean, onRequestPermissi
         }
 
         // ── Overlays ─────────────────────────────────────────────────────
-        viewer?.let { (list, index) ->
-            Viewer(
-                items = list.filter { it.id in library.map { l -> l.id }.toSet() }.ifEmpty { list },
+        viewerId?.let { id ->
+            val index = shown.indexOfFirst { it.id == id }
+            if (index < 0) {
+                // The photo went to the bin, or the list moved on without it.
+                LaunchedEffect(id) { viewerId = null }
+            } else Viewer(
+                items = shown,
                 startIndex = index,
                 favourites = favourites,
-                onClose = { viewer = null },
+                onClose = { viewerId = null },
                 onToggleFavourite = { vm.toggleFavourite(it.id) },
                 onShare = { share(listOf(it)) },
                 onDelete = { confirmDelete = listOf(it) },
@@ -219,7 +309,7 @@ fun CalmPhotosApp(vm: PhotosViewModel, hasPermission: Boolean, onRequestPermissi
                 onDeleteForever = { confirmForever = listOf(it) },
             )
         }
-        confirmDelete?.let { items ->
+        confirmDelete?.takeIf { it.isNotEmpty() }?.let { items ->
             Sheet(onDismiss = { confirmDelete = null }) {
                 Text(
                     "Move ${items.size} ${if (items.size == 1) "item" else "items"} to the bin? The system keeps binned photos for 30 days (Files → Bin) before removing them.",
@@ -232,7 +322,7 @@ fun CalmPhotosApp(vm: PhotosViewModel, hasPermission: Boolean, onRequestPermissi
                 }
             }
         }
-        confirmForever?.let { items ->
+        confirmForever?.takeIf { it.isNotEmpty() }?.let { items ->
             Sheet(onDismiss = { confirmForever = null }) {
                 Text(
                     "Erase ${items.size} ${if (items.size == 1) "item" else "items"} for good? This cannot be undone.",
@@ -243,6 +333,13 @@ fun CalmPhotosApp(vm: PhotosViewModel, hasPermission: Boolean, onRequestPermissi
                     OutlinedWord("Keep", Modifier.weight(1f)) { confirmForever = null }
                     FilledWord("Erase", Modifier.weight(1f)) { deleteForever(items) }
                 }
+            }
+        }
+        notice?.let { text ->
+            Sheet(onDismiss = { notice = null }) {
+                Text(text, style = Type.body)
+                Spacer(Modifier.height(16.dp))
+                FilledWord("Right you are", Modifier.fillMaxWidth()) { notice = null }
             }
         }
         if (showMonths) {
@@ -290,8 +387,13 @@ private fun TitleBlock(
     }
 }
 
-/** The system bin, shown as an album of its own. */
-const val BIN_ID = -3L
+/** Roughly how many URIs fit in one Binder transaction with room to spare. */
+private const val BULK_BATCH = 500
+
+/** Android's chooser has the same limit; past this it simply fails. */
+private const val SHARE_LIMIT = 200
+
+private enum class BulkOp { TRASH, RESTORE, ERASE }
 
 @Composable
 private fun BinSelectionBar(count: Int, onRestore: () -> Unit, onForever: () -> Unit, onAll: () -> Unit, onCancel: () -> Unit) {

@@ -20,10 +20,19 @@ data class MediaItem(
     val relativePath: String,
 )
 
+/** The three albums that aren't folders on disk. */
+enum class Smart { FAVOURITES, VIDEOS, BIN }
+
 data class Album(
     val id: Long,
     val name: String,
     val items: List<MediaItem>,
+    /**
+     * Null for a real folder. Folder ids come from MediaStore's BUCKET_ID, which
+     * is a signed hash of the path and is negative for about half of all folders
+     * (DCIM/Camera among them), so the sign of the id says nothing about kind.
+     */
+    val kind: Smart? = null,
 ) {
     val cover: MediaItem? get() = items.firstOrNull()
     val latest: Long get() = items.firstOrNull()?.takenAt ?: 0L
