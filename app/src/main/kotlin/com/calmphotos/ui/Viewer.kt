@@ -68,6 +68,7 @@ fun Viewer(
     var zoomed by remember { mutableStateOf(false) }
     // Which video is playing inline, if any. Held by id so swiping away stops it.
     var playingId by remember { mutableStateOf<Long?>(null) }
+    var autoPlay by remember { mutableStateOf(items.getOrNull(startIndex)?.isVideo == true) }
     var message by remember { mutableStateOf<String?>(null) }
     var showInfo by remember { mutableStateOf(false) }
     val ctx = LocalContext.current
@@ -88,8 +89,14 @@ fun Viewer(
         }
         Hairline()
 
-        // Moving to another photo stops whatever was playing.
-        LaunchedEffect(pager.currentPage) { playingId = null; message = null }
+        // Moving to another photo stops whatever was playing, and landing on a
+        // video starts it.
+        LaunchedEffect(pager.currentPage) {
+            message = null
+            val landed = items.getOrNull(pager.currentPage)
+            playingId = if (landed != null && landed.isVideo) landed.id else null
+            autoPlay = landed?.isVideo == true
+        }
 
         HorizontalPager(
             state = pager,
@@ -100,7 +107,8 @@ fun Viewer(
             val item = items[page]
             if (item.isVideo) VideoPage(
                 item = item,
-                playing = playingId == item.id,
+                // Opening a video plays it. You tapped it to watch it.
+                playing = playingId == item.id || (page == pager.currentPage && autoPlay),
                 onPlay = { message = null; playingId = item.id },
                 onStop = { playingId = null },
                 onError = { why -> playingId = null; message = why },
@@ -127,14 +135,14 @@ fun Viewer(
         ) {
             if (inBin) {
                 Word("Restore") { onRestore(current) }
-                if (current.isVideo && playingId == current.id) Word("Stop") { playingId = null }
+                if (current.isVideo && playingId == current.id) Word("Stop") { playingId = null; autoPlay = false }
                 Word("Erase", quiet = true) { onDeleteForever(current) }
             } else {
                 val fav = current.id in favourites
                 Word(if (fav) "♥ Favourite" else "♡ Favourite") { onToggleFavourite(current) }
                 Word("Share") { onShare(current) }
                 if (current.isVideo) {
-                    if (playingId == current.id) Word("Stop") { playingId = null }
+                    if (playingId == current.id) Word("Stop") { playingId = null; autoPlay = false }
                     else Word("Open in…", quiet = true) { message = openExternally(ctx, current) }
                 }
                 Word("Delete", quiet = true) { onDelete(current) }
@@ -234,7 +242,7 @@ private fun VideoPage(
                         // opaque background is painted straight over the video,
                         // which showed as a white screen with sound.
                         setOnPreparedListener { start() }
-                        setOnCompletionListener { onStop() }
+                        setOnCompletionListener { onStop() }   // stays on the last frame
                         setOnErrorListener { _, _, _ ->
                             onError("This phone can't decode ${item.mime.ifEmpty { "that format" }}. Try Open in… instead.")
                             true
