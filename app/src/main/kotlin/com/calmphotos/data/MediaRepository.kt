@@ -39,7 +39,12 @@ class MediaRepository(private val context: Context) {
         .debounce(400)
         .map { loadAll() }
 
-    suspend fun loadAll(): List<MediaItem> = withContext(Dispatchers.IO) {
+    suspend fun loadAll(): List<MediaItem> = query(trashed = false)
+
+    /** The system bin: what you removed, still recoverable for 30 days. */
+    suspend fun loadTrashed(): List<MediaItem> = query(trashed = true)
+
+    private suspend fun query(trashed: Boolean): List<MediaItem> = withContext(Dispatchers.IO) {
         val out = ArrayList<MediaItem>(2048)
         val projection = arrayOf(
             MediaStore.Files.FileColumns._ID,
@@ -62,8 +67,16 @@ class MediaRepository(private val context: Context) {
             MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE.toString(),
             MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO.toString(),
         )
+        val queryArgs = android.os.Bundle().apply {
+            putString(android.content.ContentResolver.QUERY_ARG_SQL_SELECTION, selection)
+            putStringArray(android.content.ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, args)
+            putInt(
+                MediaStore.QUERY_ARG_MATCH_TRASHED,
+                if (trashed) MediaStore.MATCH_ONLY else MediaStore.MATCH_EXCLUDE,
+            )
+        }
         try {
-            resolver.query(MediaStore.Files.getContentUri("external"), projection, selection, args, null)?.use { c ->
+            resolver.query(MediaStore.Files.getContentUri("external"), projection, queryArgs, null)?.use { c ->
                 val iId = c.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID)
                 val iType = c.getColumnIndexOrThrow(MediaStore.Files.FileColumns.MEDIA_TYPE)
                 val iTaken = c.getColumnIndexOrThrow(MediaStore.Files.FileColumns.DATE_TAKEN)
@@ -121,6 +134,14 @@ class MediaRepository(private val context: Context) {
     /** Move to the system bin (recoverable for 30 days). Returns the consent intent to launch. */
     fun trashRequest(items: List<MediaItem>) =
         MediaStore.createTrashRequest(resolver, items.map { it.uri }, true)
+
+    /** Put binned items back where they were. */
+    fun restoreRequest(items: List<MediaItem>) =
+        MediaStore.createTrashRequest(resolver, items.map { it.uri }, false)
+
+    /** Erase for good, with no way back. */
+    fun deleteForeverRequest(items: List<MediaItem>) =
+        MediaStore.createDeleteRequest(resolver, items.map { it.uri })
 
     fun uris(items: List<MediaItem>): List<Uri> = items.map { it.uri }
 }

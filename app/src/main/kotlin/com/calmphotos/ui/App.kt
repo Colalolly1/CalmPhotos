@@ -36,6 +36,7 @@ fun CalmPhotosApp(vm: PhotosViewModel, hasPermission: Boolean, onRequestPermissi
     val library by vm.library.collectAsStateWithLifecycle()
     val albums by vm.albums.collectAsStateWithLifecycle()
     val favourites by vm.favourites.collectAsStateWithLifecycle()
+    val trashed by vm.trashed.collectAsStateWithLifecycle()
     val columns by vm.columns.collectAsStateWithLifecycle()
     val loaded by vm.loaded.collectAsStateWithLifecycle()
 
@@ -46,14 +47,29 @@ fun CalmPhotosApp(vm: PhotosViewModel, hasPermission: Boolean, onRequestPermissi
     var showMonths by remember { mutableStateOf(false) }
     var showMore by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf<List<MediaItem>?>(null) }
+    var confirmForever by remember { mutableStateOf<List<MediaItem>?>(null) }
 
     val ctx = LocalContext.current
-    val trashLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { }
+    val trashLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { vm.refreshTrash() }
     fun trash(items: List<MediaItem>) {
         if (items.isEmpty()) return
         trashLauncher.launch(IntentSenderRequest.Builder(vm.trashRequest(items).intentSender).build())
         selection = null
         confirmDelete = null
+        viewer = null   // the photo you were looking at is on its way to the bin
+    }
+    fun restore(items: List<MediaItem>) {
+        if (items.isEmpty()) return
+        trashLauncher.launch(IntentSenderRequest.Builder(vm.restoreRequest(items).intentSender).build())
+        selection = null
+        viewer = null
+    }
+    fun deleteForever(items: List<MediaItem>) {
+        if (items.isEmpty()) return
+        trashLauncher.launch(IntentSenderRequest.Builder(vm.deleteForeverRequest(items).intentSender).build())
+        selection = null
+        confirmForever = null
+        viewer = null
     }
     fun share(items: List<MediaItem>) {
         if (items.isEmpty()) return
@@ -68,6 +84,7 @@ fun CalmPhotosApp(vm: PhotosViewModel, hasPermission: Boolean, onRequestPermissi
     // Keep the open album in step with the live library (deletions, new shots).
     // Smart albums (negative ids) aren't folders, so they pass straight through.
     val liveAlbum = openAlbum?.let { a -> if (a.id < 0) a else (albums.find { it.id == a.id } ?: a) }
+    val inBin = openAlbum?.id == BIN_ID
     val favItems = remember(library, favourites) { library.filter { it.id in favourites } }
     val shown: List<MediaItem> = when {
         liveAlbum != null -> liveAlbum.items
@@ -90,13 +107,18 @@ fun CalmPhotosApp(vm: PhotosViewModel, hasPermission: Boolean, onRequestPermissi
                         smart = listOfNotNull(
                             if (favItems.isNotEmpty()) Album(-1, "Favourites", favItems) else null,
                             library.filter { it.isVideo }.takeIf { it.isNotEmpty() }?.let { Album(-2, "Videos", it) },
+                            trashed.takeIf { it.isNotEmpty() }?.let { Album(BIN_ID, "Recently deleted", it) },
                         ),
                         onOpen = { a -> openAlbum = a },
                         header = { TitleBlock("Albums", "${albums.size} folder${if (albums.size == 1) "" else "s"}") },
                     )
                     else -> {
                         val smartOpen = openAlbum?.takeIf { it.id < 0 }
-                        val list = if (smartOpen != null) (if (smartOpen.id == -1L) favItems else library.filter { it.isVideo }) else shown
+                        val list = if (smartOpen != null) when (smartOpen.id) {
+                            -1L -> favItems
+                            BIN_ID -> trashed
+                            else -> library.filter { it.isVideo }
+                        } else shown
                         val ents = if (smartOpen != null) remember(list) { groupByDay(list) } else entries
                         PhotosGrid(
                             entries = ents,
@@ -119,7 +141,7 @@ fun CalmPhotosApp(vm: PhotosViewModel, hasPermission: Boolean, onRequestPermissi
                                 val photos = list.count { !it.isVideo }
                                 val videos = list.size - photos
                                 val span = list.lastOrNull()?.takenAt?.toLocalDate()
-                                val sub = buildString {
+                                val sub = if (inBin) "Kept for 30 days, then gone for good" else buildString {
                                     if (photos > 0) append("$photos photo${if (photos == 1) "" else "s"}")
                                     if (videos > 0) { if (isNotEmpty()) append("  ·  "); append("$videos video${if (videos == 1) "" else "s"}") }
                                     if (span != null && list.size > 1) {
@@ -148,7 +170,15 @@ fun CalmPhotosApp(vm: PhotosViewModel, hasPermission: Boolean, onRequestPermissi
             }
             Hairline()
             val sel = selection
-            if (sel != null) {
+            if (sel != null && inBin) {
+                BinSelectionBar(
+                    count = sel.size,
+                    onRestore = { restore(trashed.filter { it.id in sel }) },
+                    onForever = { confirmForever = trashed.filter { it.id in sel } },
+                    onAll = { selection = trashed.map { it.id }.toSet() },
+                    onCancel = { selection = null },
+                )
+            } else if (sel != null) {
                 SelectionBar(
                     count = sel.size,
                     onShare = { share(shown.filter { it.id in sel }) },
@@ -175,6 +205,20 @@ fun CalmPhotosApp(vm: PhotosViewModel, hasPermission: Boolean, onRequestPermissi
         }
 
         // ── Overlays ─────────────────────────────────────────────────────
+        viewer?.let { (list, index) ->
+            Viewer(
+                items = list.filter { it.id in library.map { l -> l.id }.toSet() }.ifEmpty { list },
+                startIndex = index,
+                favourites = favourites,
+                onClose = { viewer = null },
+                onToggleFavourite = { vm.toggleFavourite(it.id) },
+                onShare = { share(listOf(it)) },
+                onDelete = { confirmDelete = listOf(it) },
+                inBin = inBin,
+                onRestore = { restore(listOf(it)) },
+                onDeleteForever = { confirmForever = listOf(it) },
+            )
+        }
         confirmDelete?.let { items ->
             Sheet(onDismiss = { confirmDelete = null }) {
                 Text(
@@ -185,6 +229,19 @@ fun CalmPhotosApp(vm: PhotosViewModel, hasPermission: Boolean, onRequestPermissi
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     OutlinedWord("Keep", Modifier.weight(1f)) { confirmDelete = null }
                     FilledWord("Move to bin", Modifier.weight(1f)) { trash(items) }
+                }
+            }
+        }
+        confirmForever?.let { items ->
+            Sheet(onDismiss = { confirmForever = null }) {
+                Text(
+                    "Erase ${items.size} ${if (items.size == 1) "item" else "items"} for good? This cannot be undone.",
+                    style = Type.body,
+                )
+                Spacer(Modifier.height(16.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OutlinedWord("Keep", Modifier.weight(1f)) { confirmForever = null }
+                    FilledWord("Erase", Modifier.weight(1f)) { deleteForever(items) }
                 }
             }
         }
@@ -208,17 +265,6 @@ fun CalmPhotosApp(vm: PhotosViewModel, hasPermission: Boolean, onRequestPermissi
                 )
             }
         }
-        viewer?.let { (list, index) ->
-            Viewer(
-                items = list.filter { it.id in library.map { l -> l.id }.toSet() }.ifEmpty { list },
-                startIndex = index,
-                favourites = favourites,
-                onClose = { viewer = null },
-                onToggleFavourite = { vm.toggleFavourite(it.id) },
-                onShare = { share(listOf(it)) },
-                onDelete = { confirmDelete = listOf(it) },
-            )
-        }
     }
 }
 
@@ -241,6 +287,27 @@ private fun TitleBlock(
         }
         if (subtitle.isNotEmpty()) Text(subtitle, style = Type.subtitle, modifier = Modifier.padding(top = 2.dp, end = 8.dp))
         Spacer(Modifier.height(4.dp))
+    }
+}
+
+/** The system bin, shown as an album of its own. */
+const val BIN_ID = -3L
+
+@Composable
+private fun BinSelectionBar(count: Int, onRestore: () -> Unit, onForever: () -> Unit, onAll: () -> Unit, onCancel: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().background(Ink.paper).padding(horizontal = 10.dp, vertical = 4.dp).navigationBarsPadding(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            if (count == 0) "Tap to select" else "$count selected",
+            style = Type.word,
+            modifier = Modifier.weight(1f).padding(start = 8.dp),
+        )
+        Word("All", quiet = true, onClick = onAll)
+        Word("Restore", enabled = count > 0, onClick = onRestore)
+        Word("Erase", enabled = count > 0, onClick = onForever)
+        Word("Cancel", quiet = true, onClick = onCancel)
     }
 }
 

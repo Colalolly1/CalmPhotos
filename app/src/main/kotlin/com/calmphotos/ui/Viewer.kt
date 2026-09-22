@@ -43,6 +43,9 @@ fun Viewer(
     onToggleFavourite: (MediaItem) -> Unit,
     onShare: (MediaItem) -> Unit,
     onDelete: (MediaItem) -> Unit,
+    inBin: Boolean = false,
+    onRestore: (MediaItem) -> Unit = {},
+    onDeleteForever: (MediaItem) -> Unit = {},
 ) {
     if (items.isEmpty()) { onClose(); return }
     val pager = rememberPagerState(initialPage = startIndex.coerceIn(0, items.size - 1)) { items.size }
@@ -85,11 +88,17 @@ fun Viewer(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            val fav = current.id in favourites
-            Word(if (fav) "♥ Favourite" else "♡ Favourite") { onToggleFavourite(current) }
-            Word("Share") { onShare(current) }
-            if (current.isVideo) Word("Play") { play(ctx, current) }
-            Word("Delete", quiet = true) { onDelete(current) }
+            if (inBin) {
+                Word("Restore") { onRestore(current) }
+                if (current.isVideo) Word("Play") { play(ctx, current) }
+                Word("Erase", quiet = true) { onDeleteForever(current) }
+            } else {
+                val fav = current.id in favourites
+                Word(if (fav) "♥ Favourite" else "♡ Favourite") { onToggleFavourite(current) }
+                Word("Share") { onShare(current) }
+                if (current.isVideo) Word("Play") { play(ctx, current) }
+                Word("Delete", quiet = true) { onDelete(current) }
+            }
         }
     }
 }

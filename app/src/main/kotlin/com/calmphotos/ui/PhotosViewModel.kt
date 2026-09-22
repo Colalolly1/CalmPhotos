@@ -25,12 +25,20 @@ class PhotosViewModel(app: Application) : AndroidViewModel(app) {
 
     val library: StateFlow<List<MediaItem>> = hasPermission
         .flatMapLatest { ok -> if (ok) repo.library() else flowOf(emptyList()) }
-        .onEach { if (hasPermission.value) _loaded.value = true }
+        .onEach { if (hasPermission.value) { _loaded.value = true; refreshTrash() } }
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val albums: StateFlow<List<Album>> = library
         .map { repo.albums(it) }
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /** The bin, re-read whenever the media store changes or a screen asks. */
+    private val _trashed = MutableStateFlow<List<MediaItem>>(emptyList())
+    val trashed: StateFlow<List<MediaItem>> = _trashed
+
+    fun refreshTrash() {
+        viewModelScope.launch { _trashed.value = repo.loadTrashed() }
+    }
 
     val favourites: StateFlow<Set<Long>> = prefs.favourites
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
@@ -42,4 +50,6 @@ class PhotosViewModel(app: Application) : AndroidViewModel(app) {
     fun setColumns(n: Int) { viewModelScope.launch { prefs.setColumns(n) } }
 
     fun trashRequest(items: List<MediaItem>): PendingIntent = repo.trashRequest(items)
+    fun restoreRequest(items: List<MediaItem>): PendingIntent = repo.restoreRequest(items)
+    fun deleteForeverRequest(items: List<MediaItem>): PendingIntent = repo.deleteForeverRequest(items)
 }
