@@ -23,7 +23,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
-import android.widget.MediaController
 import android.widget.VideoView
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.platform.LocalContext
@@ -71,23 +70,32 @@ fun Viewer(
     var autoPlay by remember { mutableStateOf(items.getOrNull(startIndex)?.isVideo == true) }
     var message by remember { mutableStateOf<String?>(null) }
     var showInfo by remember { mutableStateOf(false) }
+    // While a video plays the words step out of the way; a tap on the picture
+    // brings them back. Photos always keep them.
+    var chrome by remember { mutableStateOf(true) }
+    var paused by remember { mutableStateOf(false) }
+    var videoView by remember { mutableStateOf<VideoView?>(null) }
+    LaunchedEffect(playingId) { chrome = playingId == null; paused = false }
+    val showChrome = chrome || playingId == null
     val ctx = LocalContext.current
     val current = items[pager.currentPage.coerceIn(0, items.size - 1)]
 
     Column(Modifier.fillMaxSize().background(Ink.white).statusBarsPadding().navigationBarsPadding()) {
         // Top: back on the left, when it was taken in the middle, Info on the right.
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Word("← Photos", onClick = onClose)
-            Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(dayLabel(current.takenAt.toLocalDate()), style = Type.dayHeader.copy(fontSize = 15.sp), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(timeLabel(current.takenAt) + "  ·  ${pager.currentPage + 1} of ${items.size}", style = Type.dayMeta)
+        if (showChrome) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Word("← Photos", onClick = onClose)
+                Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(dayLabel(current.takenAt.toLocalDate()), style = Type.dayHeader.copy(fontSize = 15.sp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(timeLabel(current.takenAt) + "  ·  ${pager.currentPage + 1} of ${items.size}", style = Type.dayMeta)
+                }
+                Word(if (showInfo) "Close" else "Info") { showInfo = !showInfo }
             }
-            Word(if (showInfo) "Close" else "Info") { showInfo = !showInfo }
+            Hairline()
         }
-        Hairline()
 
         // Moving to another photo stops whatever was playing, and landing on a
         // video starts it.
@@ -100,7 +108,7 @@ fun Viewer(
 
         HorizontalPager(
             state = pager,
-            userScrollEnabled = !zoomed && playingId == null,
+            userScrollEnabled = !zoomed,
             beyondBoundsPageCount = 1,
             modifier = Modifier.weight(1f).fillMaxWidth(),
         ) { page ->
@@ -112,6 +120,8 @@ fun Viewer(
                 onPlay = { message = null; playingId = item.id },
                 onStop = { playingId = null },
                 onError = { why -> playingId = null; message = why },
+                onTap = { chrome = !chrome },
+                onViewReady = { v -> videoView = v },
             ) else ZoomablePhoto(item, onZoomChanged = { z -> if (page == pager.currentPage) zoomed = z })
         }
 
@@ -125,8 +135,9 @@ fun Viewer(
             }
         }
 
-        if (showInfo) InfoPanel(current)
+        if (showInfo && showChrome) InfoPanel(current)
 
+        if (showChrome) {
         Hairline()
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
@@ -142,11 +153,17 @@ fun Viewer(
                 Word(if (fav) "♥ Favourite" else "♡ Favourite") { onToggleFavourite(current) }
                 Word("Share") { onShare(current) }
                 if (current.isVideo) {
-                    if (playingId == current.id) Word("Stop") { playingId = null; autoPlay = false }
-                    else Word("Open in…", quiet = true) { message = openExternally(ctx, current) }
+                    if (playingId == current.id) {
+                        Word(if (paused) "Resume" else "Pause") {
+                            val v = videoView
+                            if (v != null) { if (paused) v.start() else v.pause(); paused = !paused }
+                        }
+                        Word("Stop") { playingId = null; autoPlay = false }
+                    } else Word("Open in…", quiet = true) { message = openExternally(ctx, current) }
                 }
                 Word("Delete", quiet = true) { onDelete(current) }
             }
+        }
         }
     }
 }
@@ -225,9 +242,14 @@ private fun VideoPage(
     onPlay: () -> Unit,
     onStop: () -> Unit,
     onError: (String) -> Unit,
+    onTap: () -> Unit = {},
+    onViewReady: (VideoView?) -> Unit = {},
 ) {
     val ctx = LocalContext.current
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+    Box(
+        Modifier.fillMaxSize().then(if (playing) Modifier.clickable(onClick = onTap) else Modifier),
+        contentAlignment = Alignment.Center,
+    ) {
         if (playing) {
             // The white sits behind the surface, not on it.
             Box(Modifier.fillMaxSize().background(Ink.white))
@@ -247,11 +269,13 @@ private fun VideoPage(
                             onError("This phone can't decode ${item.mime.ifEmpty { "that format" }}. Try Open in… instead.")
                             true
                         }
-                        setMediaController(MediaController(c).also { it.setAnchorView(this) })
+                        // No MediaController: its popup was another white bar over
+                        // the picture. Pause/Resume live in the app's own words.
                         setVideoURI(item.uri)
+                        onViewReady(this)
                     }
                 },
-                onRelease = { it.stopPlayback() },
+                onRelease = { it.stopPlayback(); onViewReady(null) },
             )
         } else {
             AsyncImage(
