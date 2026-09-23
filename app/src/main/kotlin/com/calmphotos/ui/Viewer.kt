@@ -95,6 +95,11 @@ fun Viewer(
                 Word(if (showInfo) "Close" else "Info") { showInfo = !showInfo }
             }
             Hairline()
+        } else {
+            // Full-screen video still needs a way out that is always on screen.
+            Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp)) {
+                Word("← Back", onClick = onClose)
+            }
         }
 
         // Moving to another photo stops whatever was playing, and landing on a
