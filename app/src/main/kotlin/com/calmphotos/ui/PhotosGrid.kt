@@ -4,6 +4,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
@@ -96,6 +97,24 @@ fun PhotosGrid(
     }
 }
 
+/**
+ * One screen down or up with no animation, the E-Ink page turn. Going down, a
+ * row cut off at the bottom becomes the top row, so nothing is skipped; going
+ * up, a row cut off at the top ends whole at the bottom.
+ */
+suspend fun LazyGridState.pageBy(forward: Boolean) {
+    val info = layoutInfo
+    val height = info.viewportSize.height
+    if (height <= 0) return
+    val delta = if (forward) {
+        info.visibleItemsInfo.firstOrNull { it.offset.y > 0 && it.offset.y + it.size.height > height }?.offset?.y ?: height
+    } else {
+        val cut = info.visibleItemsInfo.firstOrNull { it.offset.y < 0 && it.offset.y + it.size.height in 1 until height }
+        -(height - (cut?.let { it.offset.y + it.size.height } ?: 0))
+    }
+    scrollBy(delta.toFloat())
+}
+
 @Composable
 private fun DayHeader(h: Entry.Header) {
     Row(
@@ -128,8 +147,8 @@ fun Thumb(
             .combinedClickable(onClick = onTap, onLongClick = onLongPress),
     ) {
         AsyncImage(
-            // No explicit size: Coil decodes to the measured cell, which is about
-            // 205px at four across, not the 480px this used to ask for every time.
+            // No explicit size: Coil asks for the measured cell, about 205px at four
+            // across, and ThumbnailFetcher serves it from Android's thumbnail cache.
             model = remember(item.uri) { ImageRequest.Builder(ctx).data(item.uri).build() },
             contentDescription = item.name,
             contentScale = ContentScale.Crop,

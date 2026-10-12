@@ -9,11 +9,11 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
-import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -32,6 +32,16 @@ import java.time.temporal.ChronoUnit
 private enum class Tab(val label: String) { PHOTOS("Photos"), ALBUMS("Albums"), FAVOURITES("Favourites") }
 
 /**
+ * Volume keys turn pages. The activity hears the key; the screen in front says
+ * what a page is. False hands the key back to the volume.
+ */
+class PageTurner {
+    internal var app: ((forward: Boolean) -> Boolean)? = null
+    internal var viewer: ((forward: Boolean) -> Boolean)? = null
+    fun turn(forward: Boolean): Boolean = app?.invoke(forward) ?: false
+}
+
+/**
  * The whole app on one screen: a wall of photos with day headings, Albums and
  * Favourites a word away along the bottom, and a full-screen viewer over the
  * top. No icons, no animation, nothing that leaves the phone.
@@ -42,6 +52,7 @@ fun CalmPhotosApp(
     hasPermission: Boolean,
     onRequestPermission: () -> Unit,
     partialAccess: Boolean = false,
+    pages: PageTurner = remember { PageTurner() },
 ) {
     val library by vm.library.collectAsStateWithLifecycle()
     val albums by vm.albums.collectAsStateWithLifecycle()
@@ -53,14 +64,22 @@ fun CalmPhotosApp(
     var tab by remember { mutableStateOf(Tab.PHOTOS) }
     var openAlbum by remember { mutableStateOf<Album?>(null) }
     // The open photo is held by id, not by index into a list that can change
-    // under it: binning a photo used to leave the viewer pointing at a gap.
+    // under it, and it follows every swipe.
     var viewerId by remember { mutableStateOf<Long?>(null) }
+    // Where that photo last sat, so when it leaves the list (binned, restored,
+    // unfavourited) the viewer shows the one that took its place.
+    var viewerIndex by remember { mutableIntStateOf(0) }
+    var viewerInfo by remember { mutableStateOf(false) }
     var selection by remember { mutableStateOf<Set<Long>?>(null) }
     var showMonths by remember { mutableStateOf(false) }
     var showMore by remember { mutableStateOf(false) }
-    var confirmDelete by remember { mutableStateOf<List<MediaItem>?>(null) }
+    // Only erasing for good asks first. A move to the bin is already asked by
+    // Android's own dialog, and it can be undone.
     var confirmForever by remember { mutableStateOf<List<MediaItem>?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }
+    // Once a session, after the first move to the bin, a quiet line saying where it went.
+    var binNote by remember { mutableStateOf(false) }
+    var binNoteShown by remember { mutableStateOf(false) }
     // Android marshals every URI of a trash/delete request through one Binder
     // transaction, which is capped near 1 MB, so a whole-library selection has
     // to go in batches. Each batch asks for consent once.
@@ -74,6 +93,7 @@ fun CalmPhotosApp(
         vm.refreshTrash()
         // Said no to a batch: abandon the rest rather than asking over and over.
         if (result.resultCode != android.app.Activity.RESULT_OK) queue = emptyList()
+        else if (queueOp == BulkOp.TRASH && !binNoteShown) { binNote = true; binNoteShown = true }
     }
     LaunchedEffect(queue, awaitingConsent) {
         if (awaitingConsent) return@LaunchedEffect
@@ -90,11 +110,11 @@ fun CalmPhotosApp(
 
     /** Clears the sheet first, so a confirmation can never be left with a dead button. */
     fun startBulk(op: BulkOp, items: List<MediaItem>) {
-        confirmDelete = null
         confirmForever = null
         selection = null
+        binNote = false
         if (items.isEmpty()) return
-        viewerId = null   // whatever you were looking at is on its way out
+        // The viewer stays open: when the item leaves the list it moves on to the next.
         queueOp = op
         queue = items.chunked(BULK_BATCH)
     }
@@ -136,47 +156,79 @@ fun CalmPhotosApp(
         }
     }
 
-    // One list feeds the grid, the selection bar and the viewer alike. Keeping
-    // two meant Select All could act on photos other than the ones on screen.
-    val shown: List<MediaItem> = when (liveAlbum?.kind) {
+    val albumItems: List<MediaItem> = when (liveAlbum?.kind) {
         Smart.FAVOURITES -> favItems
         Smart.VIDEOS -> videoItems
         Smart.BIN -> trashed
-        null -> when {
-            liveAlbum != null -> liveAlbum.items
-            tab == Tab.FAVOURITES -> favItems
-            else -> library
-        }
+        null -> liveAlbum?.items ?: emptyList()
     }
-    // Grouping a whole library by day is real work, and doing it inside layout
-    // showed as a stutter once the library grew. It happens off the main thread
-    // now, so the grid keeps the previous grouping for the frame it takes.
-    val entries by produceState(initialValue = emptyList<Entry>(), shown) {
-        value = withContext(Dispatchers.Default) { groupByDay(shown) }
+    // One list feeds the grid, the selection bar and the viewer alike. Keeping
+    // two meant Select All could act on photos other than the ones on screen.
+    val shown: List<MediaItem> = when {
+        liveAlbum != null -> albumItems
+        tab == Tab.FAVOURITES -> favItems
+        else -> library
     }
-    val gridState = rememberLazyGridState()
+    // Each list keeps its own day grouping and its own place. A grid handed
+    // another list's rows, even for a frame, would lose its place, so the
+    // Photos wall is never sent back to the top by a change of tab. An album
+    // starts at the top each time it is opened.
+    val photoEntries = rememberDayGroups(library, owner = Tab.PHOTOS)
+    val favEntries = rememberDayGroups(favItems, owner = Tab.FAVOURITES)
+    val albumEntries = rememberDayGroups(albumItems, owner = liveAlbum?.let { it.kind to it.id })
+    val entries = when {
+        liveAlbum != null -> albumEntries
+        tab == Tab.FAVOURITES -> favEntries
+        else -> photoEntries
+    }
+    val photosGrid = rememberLazyGridState()
+    val favouritesGrid = rememberLazyGridState()
+    val albumGrid = remember(openAlbum?.kind, openAlbum?.id) { LazyGridState() }
+    val albumsList = rememberLazyGridState()
+    val gridState = when {
+        liveAlbum != null -> albumGrid
+        tab == Tab.FAVOURITES -> favouritesGrid
+        else -> photosGrid
+    }
     val scope = rememberCoroutineScope()
     // A selection only ever means the list in front of you, so changing that
     // list drops it. Without this it followed you out and retargeted itself.
     LaunchedEffect(tab, liveAlbum?.id) {
         selection = null
-        gridState.scrollToItem(0)
+        binNote = false
     }
 
     if (!hasPermission) { PermissionScreen(onRequestPermission); return }
 
+    // Volume down and up: a screen of the wall, or one photo in the viewer, with
+    // no scrolling animation. While a sheet is open they stay volume keys.
+    SideEffect {
+        pages.app = { forward ->
+            when {
+                notice != null || confirmForever != null || showMonths || showMore -> false
+                viewerId != null -> pages.viewer?.invoke(forward) ?: false
+                else -> {
+                    val target = if (tab == Tab.ALBUMS && liveAlbum == null) albumsList else gridState
+                    scope.launch { target.pageBy(forward) }
+                    true
+                }
+            }
+        }
+    }
+    DisposableEffect(pages) { onDispose { pages.app = null } }
+
     // Without this, back closed the whole app from anywhere: from an open photo,
     // from inside an album, mid-selection. Each layer now peels off in turn.
-    val canGoBack = notice != null || confirmForever != null || confirmDelete != null ||
+    val canGoBack = notice != null || confirmForever != null ||
         showMonths || showMore || viewerId != null || selection != null ||
         openAlbum != null || tab != Tab.PHOTOS
     BackHandler(enabled = canGoBack) {
         when {
             notice != null -> notice = null
             confirmForever != null -> confirmForever = null
-            confirmDelete != null -> confirmDelete = null
             showMonths -> showMonths = false
             showMore -> showMore = false
+            viewerId != null && viewerInfo -> viewerInfo = false
             viewerId != null -> viewerId = null
             selection != null -> selection = null
             openAlbum != null -> { openAlbum = null; tab = Tab.ALBUMS }
@@ -188,7 +240,7 @@ fun CalmPhotosApp(
         Column(Modifier.fillMaxSize().statusBarsPadding()) {
             if (partialAccess) {
                 Row(
-                    Modifier.fillMaxWidth().background(Ink.paper).padding(horizontal = PagePadding, vertical = 9.dp),
+                    Modifier.fillMaxWidth().background(Ink.paper).padding(start = PagePadding, end = 10.dp, top = 2.dp, bottom = 2.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
@@ -210,7 +262,14 @@ fun CalmPhotosApp(
                             trashed.takeIf { it.isNotEmpty() }?.let { Album(-3, "Recently deleted", it, Smart.BIN) },
                         ),
                         onOpen = { a -> openAlbum = a },
-                        header = { TitleBlock("Albums", "${albums.size} folder${if (albums.size == 1) "" else "s"}") },
+                        header = {
+                            TitleBlock(
+                                title = "Albums",
+                                subtitle = "${albums.size} folder${if (albums.size == 1) "" else "s"}",
+                                onTitleTap = { scope.launch { albumsList.scrollToItem(0) } },
+                            )
+                        },
+                        state = albumsList,
                     )
                     else -> {
                         val list = shown
@@ -223,7 +282,7 @@ fun CalmPhotosApp(
                             onTap = { item ->
                                 val sel = selection
                                 if (sel != null) selection = if (item.id in sel) sel - item.id else sel + item.id
-                                else viewerId = item.id
+                                else { viewerId = item.id; viewerInfo = false }
                             },
                             onLongPress = { item -> selection = (selection ?: emptySet()) + item.id },
                             leading = {
@@ -254,12 +313,22 @@ fun CalmPhotosApp(
                                         "Months" to { showMonths = true },
                                         "Select" to { selection = emptySet() },
                                     ) else emptyList(),
-                                    onTitleTap = { scope.launch { gridState.animateScrollToItem(0) } },
+                                    onTitleTap = { scope.launch { gridState.scrollToItem(0) } },
                                 )
                             },
                             trailing = { if (list.isNotEmpty()) Colophon(list.size) },
                         )
                     }
+                }
+            }
+            if (binNote) {
+                Hairline()
+                Row(
+                    Modifier.fillMaxWidth().background(Ink.paper).padding(start = PagePadding, end = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(BIN_NOTE, style = Type.label, modifier = Modifier.weight(1f))
+                    Word("OK", quiet = true) { binNote = false }
                 }
             }
             Hairline()
@@ -276,7 +345,7 @@ fun CalmPhotosApp(
                 SelectionBar(
                     count = sel.size,
                     onShare = { share(shown.filter { it.id in sel }) },
-                    onDelete = { confirmDelete = shown.filter { it.id in sel } },
+                    onDelete = { trash(shown.filter { it.id in sel }) },
                     onAll = { selection = shown.map { it.id }.toSet() },
                     onCancel = { selection = null },
                 )
@@ -300,34 +369,32 @@ fun CalmPhotosApp(
 
         // ── Overlays ─────────────────────────────────────────────────────
         viewerId?.let { id ->
-            val index = shown.indexOfFirst { it.id == id }
+            val found = shown.indexOfFirst { it.id == id }
+            // Gone from the list: stay open on the item that took its place, and
+            // close only when nothing is left.
+            val index = if (found >= 0) found else viewerIndex.coerceAtMost(shown.lastIndex)
             if (index < 0) {
-                // The photo went to the bin, or the list moved on without it.
                 LaunchedEffect(id) { viewerId = null }
-            } else Viewer(
-                items = shown,
-                startIndex = index,
-                favourites = favourites,
-                onClose = { viewerId = null },
-                onToggleFavourite = { vm.toggleFavourite(it.id) },
-                onShare = { share(listOf(it)) },
-                onDelete = { confirmDelete = listOf(it) },
-                inBin = inBin,
-                onRestore = { restore(listOf(it)) },
-                onDeleteForever = { confirmForever = listOf(it) },
-            )
-        }
-        confirmDelete?.takeIf { it.isNotEmpty() }?.let { items ->
-            Sheet(onDismiss = { confirmDelete = null }) {
-                Text(
-                    "Move ${items.size} ${if (items.size == 1) "item" else "items"} to the bin? The system keeps binned photos for 30 days (Files → Bin) before removing them.",
-                    style = Type.body,
+            } else {
+                SideEffect { viewerIndex = index }
+                Viewer(
+                    items = shown,
+                    startIndex = index,
+                    favourites = favourites,
+                    showInfo = viewerInfo,
+                    pages = pages,
+                    onShowInfo = { viewerInfo = it },
+                    onCurrent = { viewerId = it.id },
+                    onClose = { viewerId = null },
+                    onToggleFavourite = { vm.toggleFavourite(it.id) },
+                    onShare = { share(listOf(it)) },
+                    onDelete = { trash(listOf(it)) },
+                    note = if (binNote) BIN_NOTE else null,
+                    onNoteDone = { binNote = false },
+                    inBin = inBin,
+                    onRestore = { restore(listOf(it)) },
+                    onDeleteForever = { confirmForever = listOf(it) },
                 )
-                Spacer(Modifier.height(16.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    OutlinedWord("Keep", Modifier.weight(1f)) { confirmDelete = null }
-                    FilledWord("Move to bin", Modifier.weight(1f)) { trash(items) }
-                }
             }
         }
         confirmForever?.takeIf { it.isNotEmpty() }?.let { items ->
@@ -384,15 +451,31 @@ private fun TitleBlock(
 ) {
     Column(Modifier.fillMaxWidth().padding(start = PagePadding, end = PagePadding - 8.dp, top = 10.dp)) {
         if (back != null) {
-            Text(back, style = Type.wordQuiet, modifier = Modifier.clickable(onClick = onBack).padding(vertical = 4.dp))
+            // Pulled left by the word's own padding, so the arrow lines up with the title.
+            Word(back, quiet = true, modifier = Modifier.offset(x = (-8).dp), onClick = onBack)
         }
-        Row(verticalAlignment = Alignment.Bottom) {
-            Text(title, style = Type.title, modifier = Modifier.weight(1f).clickable(onClick = onTitleTap))
-            words.forEach { (w, act) -> Word(w, onClick = act) }
+        Row {
+            Text(title, style = Type.title, modifier = Modifier.weight(1f).alignByBaseline().clickable(onClick = onTitleTap))
+            words.forEach { (w, act) -> Word(w, modifier = Modifier.alignByBaseline(), onClick = act) }
         }
         if (subtitle.isNotEmpty()) Text(subtitle, style = Type.subtitle, modifier = Modifier.padding(top = 2.dp, end = 8.dp))
         Spacer(Modifier.height(4.dp))
     }
+}
+
+/** Where binned photos go: the app's own album, not the Files app. */
+private const val BIN_NOTE = "Moved to Recently deleted, in Albums. Kept there for 30 days."
+
+/**
+ * Day grouping, worked out off the main thread. While a list is regrouped the
+ * old rows stay up; rows from a different [owner] (another album) never show.
+ */
+@Composable
+private fun rememberDayGroups(items: List<MediaItem>, owner: Any?): List<Entry> {
+    val grouped by produceState<Pair<Any?, List<Entry>>?>(null, items, owner) {
+        value = owner to withContext(Dispatchers.Default) { groupByDay(items) }
+    }
+    return grouped?.takeIf { it.first == owner }?.second ?: emptyList()
 }
 
 /** Roughly how many URIs fit in one Binder transaction with room to spare. */
@@ -406,7 +489,7 @@ private enum class BulkOp { TRASH, RESTORE, ERASE }
 @Composable
 private fun BinSelectionBar(count: Int, onRestore: () -> Unit, onForever: () -> Unit, onAll: () -> Unit, onCancel: () -> Unit) {
     Row(
-        Modifier.fillMaxWidth().background(Ink.paper).padding(horizontal = 10.dp, vertical = 4.dp).navigationBarsPadding(),
+        Modifier.fillMaxWidth().background(Ink.paper).padding(horizontal = 10.dp).navigationBarsPadding(),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
@@ -428,7 +511,7 @@ private fun BinSelectionBar(count: Int, onRestore: () -> Unit, onForever: () -> 
 @Composable
 private fun SelectionBar(count: Int, onShare: () -> Unit, onDelete: () -> Unit, onAll: () -> Unit, onCancel: () -> Unit) {
     Row(
-        Modifier.fillMaxWidth().background(Ink.paper).padding(horizontal = 10.dp, vertical = 4.dp).navigationBarsPadding(),
+        Modifier.fillMaxWidth().background(Ink.paper).padding(horizontal = 10.dp).navigationBarsPadding(),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
@@ -474,7 +557,7 @@ private fun MonthsSheet(entries: List<Entry>, onDismiss: () -> Unit, onPick: (In
     }
     Box(Modifier.fillMaxSize().background(Ink.white).statusBarsPadding()) {
         Column(Modifier.fillMaxSize()) {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("Months", style = Type.title.copy(fontSize = 24.sp), modifier = Modifier.weight(1f).padding(start = 8.dp))
                 Word("Close", onClick = onDismiss)
             }

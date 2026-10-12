@@ -5,6 +5,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material3.Text
@@ -30,9 +31,12 @@ fun AlbumsScreen(
     smart: List<Album>,
     onOpen: (Album) -> Unit,
     header: @Composable () -> Unit,
+    // Held by the app, so the list is where you left it after a folder.
+    state: LazyGridState,
 ) {
     LazyVerticalGrid(
         columns = GridCells.Fixed(2),
+        state = state,
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(start = PagePadding, end = PagePadding, bottom = 24.dp),
         horizontalArrangement = Arrangement.spacedBy(14.dp),

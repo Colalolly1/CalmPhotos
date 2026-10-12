@@ -53,7 +53,7 @@ object Type {
     val label get() = TextStyle(fontFamily = Fonts.sans, fontSize = 12.sp, color = Ink.grey)
     val body get() = TextStyle(fontFamily = Fonts.sans, fontSize = 14.sp, lineHeight = 20.sp, color = Ink.black)
     val albumName get() = TextStyle(fontFamily = Fonts.serif, fontSize = 15.sp, color = Ink.black)
-    val badge get() = TextStyle(fontFamily = Fonts.sans, fontSize = 9.sp, letterSpacing = 0.5.sp, color = Ink.white)
+    val badge get() = TextStyle(fontFamily = Fonts.sans, fontSize = 11.sp, letterSpacing = 0.5.sp, color = Ink.white)
 }
 
 val PagePadding = 18.dp

@@ -8,6 +8,7 @@ import com.calmphotos.data.Album
 import com.calmphotos.data.MediaItem
 import com.calmphotos.data.MediaRepository
 import com.calmphotos.data.Prefs
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -33,16 +34,20 @@ class PhotosViewModel(app: Application) : AndroidViewModel(app) {
     private val _loaded = MutableStateFlow(false)
     val loaded: StateFlow<Boolean> = _loaded
 
+    // Watching stops a few seconds after the app leaves the screen, so nothing is
+    // re-read behind a closed app. Coming back starts it again with a fresh read,
+    // and the last list stays on screen meanwhile.
     val library: StateFlow<List<MediaItem>> = hasPermission
         .flatMapLatest { ok ->
             if (ok) merge(repo.library(), manualReload.map { repo.loadAll() }) else flowOf(emptyList())
         }
         .onEach { if (hasPermission.value) { _loaded.value = true; refreshTrash() } }
-        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_AFTER_MS), emptyList())
 
     val albums: StateFlow<List<Album>> = library
         .map { repo.albums(it) }
-        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+        .flowOn(Dispatchers.Default)   // grouping a whole library by folder is real work
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(STOP_AFTER_MS), emptyList())
 
     /** The bin, re-read whenever the media store changes or a screen asks. */
     private val _trashed = MutableStateFlow<List<MediaItem>>(emptyList())
@@ -65,3 +70,6 @@ class PhotosViewModel(app: Application) : AndroidViewModel(app) {
     fun restoreRequest(items: List<MediaItem>): PendingIntent = repo.restoreRequest(items)
     fun deleteForeverRequest(items: List<MediaItem>): PendingIntent = repo.deleteForeverRequest(items)
 }
+
+/** Grace period before watching stops, so a moment in another app costs nothing. */
+private const val STOP_AFTER_MS = 5_000L

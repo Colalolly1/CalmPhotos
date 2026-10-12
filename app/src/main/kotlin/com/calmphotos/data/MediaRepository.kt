@@ -26,13 +26,16 @@ class MediaRepository(private val context: Context) {
 
     private val resolver: ContentResolver get() = context.contentResolver
 
-    /** Emits the full library on start and again after any media-store change. */
+    /** Emits the full library on start and again after any change to photos or videos. */
     @OptIn(kotlinx.coroutines.FlowPreview::class)
     fun library(): Flow<List<MediaItem>> = callbackFlow {
         val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
             override fun onChange(selfChange: Boolean) { trySend(Unit) }
         }
-        resolver.registerContentObserver(MediaStore.Files.getContentUri("external"), true, observer)
+        // Just the two collections shown here. The whole Files table also changes
+        // for downloads and documents, and each of those meant a full re-read.
+        resolver.registerContentObserver(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, true, observer)
+        resolver.registerContentObserver(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, true, observer)
         awaitClose { resolver.unregisterContentObserver(observer) }
     }
         .onStart { emit(Unit) }

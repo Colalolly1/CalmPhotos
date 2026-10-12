@@ -1,26 +1,46 @@
 package com.calmphotos.ui
 
+import androidx.compose.foundation.Indication
+import androidx.compose.foundation.IndicationInstance
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.InteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.ContentDrawScope
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 
-/** Words, not icons: the whole app is operated by tapping plain labels. */
+/**
+ * Pressing draws nothing extra. The default press highlight is a grey wash
+ * that fades out, and on E-Ink the fade leaves ghosts. MainActivity provides
+ * this at the root, so every clickable in the app goes without.
+ */
+object NoIndication : Indication {
+    private object Plain : IndicationInstance {
+        override fun ContentDrawScope.drawIndication() { drawContent() }
+    }
+
+    @Composable
+    override fun rememberUpdatedInstance(interactionSource: InteractionSource): IndicationInstance = Plain
+}
+
+/** Words, not icons: the whole app is operated by tapping plain labels. Never less than 48dp to hit. */
 @Composable
-fun Word(text: String, quiet: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) {
+fun Word(text: String, quiet: Boolean = false, enabled: Boolean = true, modifier: Modifier = Modifier, onClick: () -> Unit) {
     Text(
         text = text,
         style = if (quiet || !enabled) Type.wordQuiet else Type.word,
-        modifier = Modifier
+        modifier = modifier
             .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 8.dp, vertical = 8.dp),
+            .sizeIn(minWidth = 48.dp, minHeight = 48.dp)
+            .wrapContentSize()
+            .padding(horizontal = 8.dp),
     )
 }
 
@@ -54,9 +74,11 @@ fun Chip(label: String, selected: Boolean, onClick: () -> Unit) {
     Box(
         Modifier
             .background(if (selected) Ink.black else Ink.white)
-            .then(if (selected) Modifier else Modifier.border(1.dp, Color(0xFFBBBBBB)))
+            .then(if (selected) Modifier else Modifier.border(1.dp, Ink.hairline))
             .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 7.dp),
+            .sizeIn(minWidth = 48.dp, minHeight = 48.dp)
+            .padding(horizontal = 14.dp),
+        contentAlignment = Alignment.Center,
     ) {
         Text(label, style = Type.label.copy(color = if (selected) Ink.white else Ink.black))
     }
@@ -66,7 +88,8 @@ fun Chip(label: String, selected: Boolean, onClick: () -> Unit) {
 @Composable
 fun TabWord(label: String, selected: Boolean, onClick: () -> Unit) {
     Column(
-        Modifier.width(IntrinsicSize.Max).clickable(onClick = onClick).padding(horizontal = 6.dp),
+        Modifier.width(IntrinsicSize.Max).heightIn(min = 48.dp).clickable(onClick = onClick).padding(horizontal = 6.dp),
+        verticalArrangement = Arrangement.Bottom,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text(
