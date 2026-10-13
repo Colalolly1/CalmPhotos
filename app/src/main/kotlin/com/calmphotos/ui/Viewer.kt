@@ -204,6 +204,9 @@ fun Viewer(
                 onError = { why -> playingId = null; autoPlay = false; message = why },
                 onTap = { chrome = !chrome },
                 onViewReady = { v -> videoView = v },
+                // Swiping between two videos can release the old view after the
+                // new one is made, so only the view in hand is let go.
+                onViewReleased = { v -> if (videoView === v) videoView = null },
                 resumeAt = { heldAt?.takeIf { it.first == item.id }?.second },
             ) else ZoomablePhoto(
                 item = item,
@@ -378,7 +381,8 @@ private fun VideoPage(
     onStop: () -> Unit,
     onError: (String) -> Unit,
     onTap: () -> Unit = {},
-    onViewReady: (VideoView?) -> Unit = {},
+    onViewReady: (VideoView) -> Unit = {},
+    onViewReleased: (VideoView) -> Unit = {},
     resumeAt: () -> Int? = { null },
 ) {
     val ctx = LocalContext.current
@@ -417,7 +421,7 @@ private fun VideoPage(
                         onViewReady(this)
                     }
                 },
-                onRelease = { it.stopPlayback(); onViewReady(null) },
+                onRelease = { it.stopPlayback(); onViewReleased(it) },
             )
         } else {
             val screen = rememberScreenSize()

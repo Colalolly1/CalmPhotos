@@ -142,6 +142,8 @@ fun CalmPhotosApp(
     // Keep the open album in step with the live library (deletions, new shots).
     // Smart albums aren't folders, so they pass straight through.
     val liveAlbum = openAlbum?.let { a -> if (a.kind != null) a else albums.find { it.id == a.id } }
+    // An open folder that has dropped out of albums, as when its last photo is binned.
+    val folderGone = openAlbum.let { it != null && it.kind == null } && liveAlbum == null
     val inBin = liveAlbum?.kind == Smart.BIN
     val favItems = remember(library, favourites) { library.filter { it.id in favourites } }
     val videoItems = remember(library) { library.filter { it.isVideo } }
@@ -151,6 +153,7 @@ fun CalmPhotosApp(
     LaunchedEffect(openAlbum, albums, loaded) {
         val open = openAlbum
         if (open != null && open.kind == null && loaded && albums.none { it.id == open.id }) {
+            viewerId = null
             openAlbum = null
             tab = Tab.ALBUMS
         }
@@ -164,8 +167,10 @@ fun CalmPhotosApp(
     }
     // One list feeds the grid, the selection bar and the viewer alike. Keeping
     // two meant Select All could act on photos other than the ones on screen.
+    // A gone folder shows nothing, never the whole library in its place.
     val shown: List<MediaItem> = when {
         liveAlbum != null -> albumItems
+        folderGone -> emptyList()
         tab == Tab.FAVOURITES -> favItems
         else -> library
     }
@@ -371,7 +376,7 @@ fun CalmPhotosApp(
         viewerId?.let { id ->
             val found = shown.indexOfFirst { it.id == id }
             // Gone from the list: stay open on the item that took its place, and
-            // close only when nothing is left.
+            // close only when nothing is left. A gone folder leaves nothing, so -1.
             val index = if (found >= 0) found else viewerIndex.coerceAtMost(shown.lastIndex)
             if (index < 0) {
                 LaunchedEffect(id) { viewerId = null }
