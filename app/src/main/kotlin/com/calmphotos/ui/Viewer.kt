@@ -1,14 +1,20 @@
 package com.calmphotos.ui
 
+import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.graphics.Bitmap
+import android.view.Gravity
+import android.view.ViewGroup
+import android.widget.FrameLayout
 import android.widget.VideoView
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
 import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -20,6 +26,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size as GeoSize
+import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
@@ -28,10 +36,14 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.exifinterface.media.ExifInterface
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -54,10 +66,18 @@ private const val SHARP_AT = 1.5f
  */
 private const val DETAIL_DECODE = 3072
 
+/** As far in as a pinch goes. */
+private const val MAX_ZOOM = 6f
+
+/** Where a double-tap takes a photo at rest. */
+private const val DOUBLE_TAP_ZOOM = 2.5f
+
 /**
- * Full-screen viewer. Swipe between photos, pinch or double-tap to zoom,
- * words along the bottom for the four things you actually do with a photo.
- * Videos show their first frame and play here when tapped.
+ * Full-screen viewer. The picture has the whole screen: the phone's status and
+ * navigation bars are hidden while it is open, and the words float over the
+ * picture rather than taking space from it. One tap hides them, another brings
+ * them back. Swipe between photos, pinch or double-tap to zoom. Videos show
+ * their first frame and play here when tapped, with the words out of the way.
  *
  * [startIndex] is the app's record of what is open, and it follows every swipe
  * through [onCurrent]. The words and labels go by it rather than the pager's
@@ -93,21 +113,25 @@ fun Viewer(
     var playingId by remember { mutableStateOf<Long?>(null) }
     var autoPlay by remember { mutableStateOf(items[openIndex].isVideo) }
     var message by remember { mutableStateOf<String?>(null) }
-    // While a video plays the words step out of the way; a tap on the picture
-    // brings them back. Photos always keep them.
+    // The words over the picture. A tap on a photo or a playing video hides or
+    // shows them; a video starting hides them. Hidden stays hidden from one
+    // photo to the next, so you can look through a run of them full screen.
     var chrome by remember { mutableStateOf(true) }
     var paused by remember { mutableStateOf(false) }
     var videoView by remember { mutableStateOf<VideoView?>(null) }
     // Where a video stood when the app went to the background. Coming back
     // finds it there, paused, rather than starting over from the top with sound.
     var heldAt by remember { mutableStateOf<Pair<Long, Int>?>(null) }
+    // A video starting hides the words; one stopping brings them back, with its Play.
     LaunchedEffect(playingId) { chrome = playingId == null; paused = false; heldAt = null }
-    val showChrome = chrome || playingId == null
-    // Info is hidden with the other words while a video fills the screen; let
-    // it go, or Back would spend a press closing something you can't see.
+    val showChrome = chrome
+    // Info is hidden with the other words; let it go, or Back would spend a
+    // press closing something you can't see.
     LaunchedEffect(showChrome, showInfo) { if (!showChrome && showInfo) onShowInfo(false) }
     val ctx = LocalContext.current
     val current = items[openIndex]
+
+    HideSystemBars()
 
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     DisposableEffect(lifecycle) {
@@ -164,34 +188,15 @@ fun Viewer(
     }
     DisposableEffect(pages) { onDispose { pages.viewer = null } }
 
-    Column(Modifier.fillMaxSize().background(Ink.white).statusBarsPadding().navigationBarsPadding()) {
-        // Top: back on the left, when it was taken in the middle, Info on the right.
-        if (showChrome) {
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Word("← Photos", onClick = onClose)
-                Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(dayLabel(current.takenAt.toLocalDate()), style = Type.dayHeader.copy(fontSize = 15.sp), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(timeLabel(current.takenAt) + "  ·  ${openIndex + 1} of ${items.size}", style = Type.dayMeta)
-                }
-                Word(if (showInfo) "Close" else "Info") { onShowInfo(!showInfo) }
-            }
-            Hairline()
-        } else {
-            // Full-screen video still needs a way out that is always on screen.
-            Row(Modifier.fillMaxWidth().padding(horizontal = 10.dp)) {
-                Word("← Back", onClick = onClose)
-            }
-        }
-
+    // The picture fills the whole screen and never changes size. The words are
+    // laid over it, so showing or hiding them can't make the picture jump.
+    Box(Modifier.fillMaxSize().background(Ink.white)) {
         HorizontalPager(
             state = pager,
             userScrollEnabled = !zoomed,
             beyondBoundsPageCount = 1,
             key = { page -> items[page].id },
-            modifier = Modifier.weight(1f).fillMaxWidth(),
+            modifier = Modifier.fillMaxSize(),
         ) { page ->
             val item = items[page]
             if (item.isVideo) VideoPage(
@@ -212,61 +217,150 @@ fun Viewer(
                 item = item,
                 isCurrent = page == pager.currentPage,
                 onZoomChanged = { z -> if (page == pager.currentPage) zoomed = z },
+                onTap = { chrome = !chrome },
             )
         }
 
-        (message ?: note)?.let { text ->
-            Row(
-                Modifier.fillMaxWidth().background(Ink.paper).padding(start = 14.dp, end = 6.dp, top = 2.dp, bottom = 2.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(text, style = Type.label, modifier = Modifier.weight(1f))
-                Word("OK", quiet = true) { if (message != null) message = null else onNoteDone() }
-            }
-        }
-
-        if (showInfo && showChrome) InfoPanel(current)
-
+        // Top: back on the left, when it was taken in the middle, Info on the right.
+        // Kept clear of a camera cutout; the hidden status bar takes no room.
         if (showChrome) {
-        Hairline()
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 10.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            if (inBin) {
-                Word("Restore") { onRestore(current) }
-                if (current.isVideo && playingId == current.id) Word("Stop") { playingId = null; autoPlay = false }
-                Word("Erase", quiet = true) { onDeleteForever(current) }
-            } else {
-                val fav = current.id in favourites
-                Word(if (fav) "♥ Favourite" else "♡ Favourite") { onToggleFavourite(current) }
-                Word("Share") { onShare(current) }
-                if (current.isVideo) {
-                    if (playingId == current.id) {
-                        Word(if (paused) "Resume" else "Pause") {
-                            val v = videoView
-                            if (v != null) {
-                                if (paused) { heldAt = null; v.start() } else v.pause()
-                                paused = !paused
-                            }
-                        }
-                        Word("Stop") { playingId = null; autoPlay = false }
-                    } else Word("Open in…", quiet = true) { message = openExternally(ctx, current) }
+            Column(
+                Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .swallowTaps()
+                    .background(Ink.white)
+                    .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)),
+            ) {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Word("← Photos", onClick = onClose)
+                    Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(dayLabel(current.takenAt.toLocalDate()), style = Type.dayHeader.copy(fontSize = 15.sp), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(timeLabel(current.takenAt) + "  ·  ${openIndex + 1} of ${items.size}", style = Type.dayMeta)
+                    }
+                    Word(if (showInfo) "Close" else "Info") { onShowInfo(!showInfo) }
                 }
-                Word("Delete", quiet = true) { onDelete(current) }
+                Hairline()
             }
         }
+
+        // Bottom: any note, Info when asked for, then the words. Laid over the
+        // picture too, and only drawn when there is something to show.
+        val line = message ?: note
+        if (line != null || showChrome) {
+            Column(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .swallowTaps()
+                    .background(Ink.white)
+                    .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal)),
+            ) {
+                line?.let { text ->
+                    Row(
+                        Modifier.fillMaxWidth().background(Ink.paper).padding(start = 14.dp, end = 6.dp, top = 2.dp, bottom = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(text, style = Type.label, modifier = Modifier.weight(1f))
+                        Word("OK", quiet = true) { if (message != null) message = null else onNoteDone() }
+                    }
+                }
+
+                if (showInfo && showChrome) InfoPanel(current)
+
+                if (showChrome) {
+                    Hairline()
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (inBin) {
+                            Word("Restore") { onRestore(current) }
+                            if (current.isVideo && playingId == current.id) Word("Stop") { playingId = null; autoPlay = false }
+                            Word("Erase", quiet = true) { onDeleteForever(current) }
+                        } else {
+                            val fav = current.id in favourites
+                            Word(if (fav) "♥ Favourite" else "♡ Favourite") { onToggleFavourite(current) }
+                            Word("Share") { onShare(current) }
+                            if (current.isVideo) {
+                                if (playingId == current.id) {
+                                    Word(if (paused) "Resume" else "Pause") {
+                                        val v = videoView
+                                        if (v != null) {
+                                            if (paused) { heldAt = null; v.start() } else v.pause()
+                                            paused = !paused
+                                        }
+                                    }
+                                    Word("Stop") { playingId = null; autoPlay = false }
+                                } else Word("Open in…", quiet = true) { message = openExternally(ctx, current) }
+                            }
+                            Word("Delete", quiet = true) { onDelete(current) }
+                        }
+                    }
+                }
+            }
         }
     }
 }
 
-/** The screen in pixels, which is all the viewer ever needs to decode. */
+/**
+ * Hides the status and navigation bars while the viewer is open, so the
+ * picture has every pixel. A swipe in from the edge shows them for a moment
+ * over the picture. Hidden again on returning to the app, since another app
+ * or a system dialog in between can bring them back.
+ */
+@Composable
+private fun HideSystemBars() {
+    val view = LocalView.current
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    DisposableEffect(view, lifecycle) {
+        val window = view.context.findActivity()?.window
+        if (window == null) return@DisposableEffect onDispose { }
+        val bars = WindowCompat.getInsetsController(window, view)
+        bars.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        bars.hide(WindowInsetsCompat.Type.systemBars())
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) bars.hide(WindowInsetsCompat.Type.systemBars())
+        }
+        lifecycle.addObserver(observer)
+        onDispose {
+            lifecycle.removeObserver(observer)
+            bars.show(WindowInsetsCompat.Type.systemBars())
+        }
+    }
+}
+
+/**
+ * A bar laid over the picture keeps its taps. Without this a tap between two
+ * words fell through to the photo underneath and hid the bar you were aiming at.
+ */
+private fun Modifier.swallowTaps(): Modifier = pointerInput(Unit) { detectTapGestures { } }
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
+/**
+ * The whole screen in pixels, bars included, which is all the viewer ever needs
+ * to decode. The display metrics leave out the navigation bar, and with the
+ * bars hidden a photo filling the height was drawn a little larger than it was
+ * decoded, and a little soft.
+ */
 @Composable
 private fun rememberScreenSize(): Size {
     val conf = LocalConfiguration.current
-    val metrics = LocalContext.current.resources.displayMetrics
-    return remember(conf.screenWidthDp, conf.screenHeightDp) { Size(metrics.widthPixels, metrics.heightPixels) }
+    val ctx = LocalContext.current
+    return remember(conf.screenWidthDp, conf.screenHeightDp, conf.orientation) {
+        val bounds = ctx.findActivity()?.windowManager?.maximumWindowMetrics?.bounds
+        if (bounds != null && bounds.width() > 0 && bounds.height() > 0) Size(bounds.width(), bounds.height())
+        else ctx.resources.displayMetrics.let { Size(it.widthPixels, it.heightPixels) }
+    }
 }
 
 /**
@@ -282,7 +376,12 @@ private fun screenRequest(ctx: Context, item: MediaItem, screen: Size): ImageReq
         .build()
 
 @Composable
-private fun ZoomablePhoto(item: MediaItem, isCurrent: Boolean, onZoomChanged: (Boolean) -> Unit) {
+private fun ZoomablePhoto(
+    item: MediaItem,
+    isCurrent: Boolean,
+    onZoomChanged: (Boolean) -> Unit,
+    onTap: () -> Unit,
+) {
     val ctx = LocalContext.current
     var scale by remember(item.id) { mutableFloatStateOf(1f) }
     var offset by remember(item.id) { mutableStateOf(Offset.Zero) }
@@ -290,6 +389,11 @@ private fun ZoomablePhoto(item: MediaItem, isCurrent: Boolean, onZoomChanged: (B
     // the line doesn't reload the photo over and over.
     var sharp by remember(item.id) { mutableStateOf(false) }
     var boxSize by remember { mutableStateOf(IntSize.Zero) }
+    // The photo's own shape once it has loaded, turned the right way up. Panning
+    // stops at the photo's edges, which for a wide photo on a tall screen are
+    // well inside the screen's.
+    var picture by remember(item.id) { mutableStateOf(GeoSize.Unspecified) }
+    val latestOnTap by rememberUpdatedState(onTap)
     LaunchedEffect(scale) {
         onZoomChanged(scale > 1.01f)
         if (scale > SHARP_AT) sharp = true else if (scale <= 1.01f) sharp = false
@@ -314,12 +418,41 @@ private fun ZoomablePhoto(item: MediaItem, isCurrent: Boolean, onZoomChanged: (B
             .build()
     }
 
-    /** Keep the picture over the hole it is shown through, never beyond its edges. */
+    /** The photo's size on screen at rest: fitted inside the screen, centred. */
+    fun restingSize(): GeoSize {
+        val bw = boxSize.width.toFloat()
+        val bh = boxSize.height.toFloat()
+        if (bw <= 0f || bh <= 0f) return GeoSize.Zero
+        val p = picture
+        val (pw, ph) = when {
+            p.isSpecified && p.width > 0f && p.height > 0f -> p.width to p.height
+            item.width > 0 && item.height > 0 -> item.width.toFloat() to item.height.toFloat()
+            else -> return GeoSize(bw, bh)
+        }
+        val fit = minOf(bw / pw, bh / ph)
+        return GeoSize(pw * fit, ph * fit)
+    }
+
+    /** Keep the photo covering the screen where it can, and never dragged off it. */
     fun clampOffset() {
-        val maxX = (boxSize.width * (scale - 1f) / 2f).coerceAtLeast(0f)
-        val maxY = (boxSize.height * (scale - 1f) / 2f).coerceAtLeast(0f)
+        val rest = restingSize()
+        val maxX = ((rest.width * scale - boxSize.width) / 2f).coerceAtLeast(0f)
+        val maxY = ((rest.height * scale - boxSize.height) / 2f).coerceAtLeast(0f)
         offset = Offset(offset.x.coerceIn(-maxX, maxX), offset.y.coerceIn(-maxY, maxY))
     }
+
+    /** Zoom by [factor], keeping the spot under [focus] where it is on screen. */
+    fun zoomAround(focus: Offset, factor: Float) {
+        val target = (scale * factor).coerceIn(1f, MAX_ZOOM)
+        val step = target / scale
+        val fromCentre = focus - Offset(boxSize.width / 2f, boxSize.height / 2f)
+        offset = fromCentre * (1f - step) + offset * step
+        scale = target
+        if (scale <= 1.01f) { scale = 1f; offset = Offset.Zero }
+    }
+
+    // Turning the phone or the photo finishing loading can move the edges.
+    LaunchedEffect(boxSize, picture) { clampOffset() }
 
     Box(
         Modifier
@@ -338,11 +471,10 @@ private fun ZoomablePhoto(item: MediaItem, isCurrent: Boolean, onZoomChanged: (B
                         val fingers = event.changes.count { it.pressed }
                         val ours = fingers > 1 || scale > 1.01f
                         if (ours) {
+                            // Zoom about the point between the fingers, not the
+                            // middle of the screen, so what you pinch stays put.
                             val zoom = event.calculateZoom()
-                            if (zoom != 1f) {
-                                scale = (scale * zoom).coerceIn(1f, 6f)
-                                if (scale <= 1.01f) { scale = 1f; offset = Offset.Zero }
-                            }
+                            if (zoom != 1f) zoomAround(event.calculateCentroid(useCurrent = false), zoom)
                             if (scale > 1.01f) offset += event.calculatePan()
                             clampOffset()
                             event.changes.forEach { if (it.positionChanged()) it.consume() }
@@ -351,11 +483,15 @@ private fun ZoomablePhoto(item: MediaItem, isCurrent: Boolean, onZoomChanged: (B
                 }
             }
             .pointerInput(item.id) {
-                detectTapGestures(onDoubleTap = {
-                    if (scale > 1.01f) { scale = 1f } else { scale = 2.5f }
-                    offset = Offset.Zero
-                    clampOffset()
-                })
+                detectTapGestures(
+                    onTap = { latestOnTap() },
+                    // In on the spot you tapped; out to the whole photo.
+                    onDoubleTap = { at ->
+                        if (scale > 1.01f) { scale = 1f; offset = Offset.Zero }
+                        else zoomAround(at, DOUBLE_TAP_ZOOM / scale)
+                        clampOffset()
+                    },
+                )
             },
         contentAlignment = Alignment.Center,
     ) {
@@ -363,6 +499,7 @@ private fun ZoomablePhoto(item: MediaItem, isCurrent: Boolean, onZoomChanged: (B
             model = if (sharp && isCurrent) detailed else fitted,
             contentDescription = item.name,
             contentScale = ContentScale.Fit,
+            onSuccess = { state -> picture = state.painter.intrinsicSize },
             modifier = Modifier
                 .fillMaxSize()
                 .graphicsLayer {
@@ -387,10 +524,8 @@ private fun VideoPage(
 ) {
     val ctx = LocalContext.current
     val latestResumeAt by rememberUpdatedState(resumeAt)
-    Box(
-        Modifier.fillMaxSize().then(if (playing) Modifier.clickable(onClick = onTap) else Modifier),
-        contentAlignment = Alignment.Center,
-    ) {
+    val latestOnTap by rememberUpdatedState(onTap)
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         if (playing) {
             // The white sits behind the surface, not on it.
             Box(Modifier.fillMaxSize().background(Ink.white))
@@ -400,7 +535,7 @@ private fun VideoPage(
             AndroidView(
                 modifier = Modifier.fillMaxSize(),
                 factory = { c ->
-                    VideoView(c).apply {
+                    val video = VideoView(c).apply {
                         // No background here: VideoView is a SurfaceView, and an
                         // opaque background is painted straight over the video,
                         // which showed as a white screen with sound.
@@ -420,9 +555,27 @@ private fun VideoPage(
                         setVideoURI(item.uri)
                         onViewReady(this)
                     }
+                    // VideoView shrinks itself to the video's shape inside the
+                    // space it is given. The frame puts that shape in the middle
+                    // of the screen, as large as it fits, never stretched.
+                    FrameLayout(c).apply {
+                        addView(
+                            video,
+                            FrameLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                Gravity.CENTER,
+                            ),
+                        )
+                    }
                 },
-                onRelease = { it.stopPlayback(); onViewReleased(it) },
+                onRelease = { frame ->
+                    (frame.getChildAt(0) as? VideoView)?.let { v -> v.stopPlayback(); onViewReleased(v) }
+                },
             )
+            // Taps are caught here, above the video, rather than left to find their
+            // way through the Android view underneath. A swipe still turns the page.
+            Box(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures(onTap = { latestOnTap() }) })
         } else {
             val screen = rememberScreenSize()
             AsyncImage(

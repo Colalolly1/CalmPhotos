@@ -567,7 +567,8 @@ private fun MonthsSheet(entries: List<Entry>, onDismiss: () -> Unit, onPick: (In
                 Word("Close", onClick = onDismiss)
             }
             Hairline()
-            LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
+            // Clear of the navigation bar, or the last months sat underneath it.
+            LazyColumn(Modifier.fillMaxSize().navigationBarsPadding(), contentPadding = PaddingValues(bottom = 24.dp)) {
                 items(months) { (label, index, count) ->
                     Row(
                         Modifier.fillMaxWidth().clickable { onPick(index) }.padding(horizontal = PagePadding, vertical = 14.dp),

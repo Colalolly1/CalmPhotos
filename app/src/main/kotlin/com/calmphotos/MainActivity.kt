@@ -5,7 +5,9 @@ import android.content.pm.PackageManager
 import android.os.Bundle
 import android.view.KeyEvent
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.LocalIndication
@@ -44,6 +46,15 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // The app draws the whole screen and each screen keeps itself clear of the
+        // bars. Without this the window stopped short of them, so the viewer could
+        // never be truly full screen, and hiding the status bar left a blank band
+        // where a camera cutout is. Android 15 already forces it; now every
+        // version looks the same. Dark icons on white, no grey wash.
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.light(android.graphics.Color.WHITE, android.graphics.Color.WHITE),
+        )
         super.onCreate(savedInstanceState)
         refresh()
         setContent {
